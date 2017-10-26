@@ -1,0 +1,41 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use 5.10.0;
+
+# standard perl
+use Cwd qw(realpath);
+use Data::Dumper;
+use FindBin;
+use Getopt::Long;
+
+# RPC Switch
+use lib realpath("$FindBin::Bin/../lib");
+use RPC::Switch;
+
+exit main();
+
+sub main {
+	my $cfgdir = realpath("$FindBin::Bin/../etc/");
+	my $cfgfile = 'rpcswitch.conf';
+	my $daemonize = 0;
+	my $debug = 1;
+
+	GetOptions(
+		'cfgdir=s' => \$cfgdir,
+		'cfgfile=s' => \$cfgfile,
+		'daemon!' => \$daemonize,
+		'debug' => \&debug,
+	) or die "Error in command line arguments\n";
+
+	my $switch = RPC::Switch->new(
+		cfgdir => $cfgdir,
+		cfgfile => $cfgfile,
+		daemon => $daemonize,
+		debug => $debug,
+	);
+	die 'no RPC Switch?' unless $switch;
+
+	return $switch->work();
+}
