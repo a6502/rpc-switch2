@@ -61,7 +61,7 @@ has [qw(
 	methods
 	pid_file
 	ping
-	server
+	servers
 	timeout
 	worker_id
 	workermethods
@@ -92,11 +92,12 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-use constant {
-	RES_OK => 0,
-	RES_WAIT => -1,
-	RES_ERROR => -2,
-};
+# keep in sync with RPC::Switch::Client
+#use constant {
+#	RES_OK => 'RES_OK',
+#	RES_WAIT => 'RES_WAIT',
+#	RES_ERROR => 'RES_ERROR',
+#};
 
 sub new {
 	my ($class, %args) = @_;
@@ -106,80 +107,76 @@ sub new {
 	die "no configdir?" unless $cfgdir;
 	my $cfgfile = $args{cfgfile} // 'rpcswitch.conf';
 	my $cfgpath = "$cfgdir/$cfgfile";
-	my $cfg = Config::Tiny->read($cfgpath);
-	die "failed to read config $cfgpath: " . Config::Tiny->errstr unless $cfg;
 
-	#print Dumper($cfg);
-	my $methodcfg = $cfg->{rpcswitch}->{methods};
-	die 'no method configuration?' unless $methodcfg;
-	my $methodpath = "$cfgdir/$methodcfg";
-	$self->load_config($methodpath);	
-	#$methodcfg = Config::Tiny->read($methodpath);
-	#die "failed to read config $methodpath: " . Config::Tiny->errstr unless $methodcfg;
-	#print Dumper($methodcfg);
-	#my %methods;
-	#while (my ($namespace, $methods) = each(%$methodcfg)) {
-	#	while (my ($method, $backend) = each(%$methods)) {
-	#		$backend = "$backend$method" if $backend =~ '\.$';
-	#		$methods{"$namespace.$method"} = $backend;
-	#	}
-	#}
-	print 'who2acl: ', Dumper($self->{who2acl});
-	print 'methods: ', Dumper($self->{methods});
-	
-	my $apiname = ($args{apiname} || fileparse($0)); # . " [$$]";
-	my $daemon = $args{daemon} // 0; # or 1?
-	my $debug = $args{debug} // 0; # or 1?
-	my $log = $args{log} // Mojo::Log->new();
+	my $slurp = Mojo::File->new($cfgpath)->slurp();
+	my $cfg;
+	local $@;
+	eval $slurp;
+	die "failed to load config $cfgpath: $@\n" if $@;
+	die "empty config $cfgpath?" unless $cfg;
+	$self->{cfg} = $cfg;
+
+	my $apiname = $self->{apiname} = ($args{apiname} || fileparse($0)); # . " [$$]";
+	my $daemon = $self->{daemon} = $args{daemon} // 0; # or 1?
+	my $debug = $self->{debug} = $args{debug} // 0; # or 1?
+
+	my $log = $self->{log} = $args{log} // Mojo::Log->new(level => ($debug) ? 'debug' : 'info');
 	$log->path(realpath("$FindBin::Bin/../log/$apiname.log")) if $daemon;
 
 	my $pid_file = $cfg->{pid_file} // realpath("$FindBin::Bin/../log/$apiname.pid");
 	die "$apiname already running?" if $daemon and check_pid($pid_file);
 
+	#print Dumper($cfg);
+	my $methodcfg = $cfg->{methods} or die 'no method configuration?';
+	$self->{methodpath} = "$cfgdir/$methodcfg";
+	$self->_load_config();
+	die 'method config failed to load?' unless $self->{methods};
+
 	# keep sorted
-	$self->{apiname} = $apiname;
-	$self->{cfg} = $cfg;
 	$self->{channels} = {};
-	$self->{daemon} = $daemon;
-	$self->{debug} = $debug;
 	$self->{internal} = {}; # rpcswitch.x internal methods
-	$self->{log} = $log;
-	#$self->{methods} = \%methods; # method configuration
 	$self->{pid_file} = $pid_file if $daemon;
 	$self->{ping} = $args{ping} || 60;
 	$self->{timeout} = $args{timeout} // 60; # 0 is a valid timeout?
 	$self->{worker_id} = 0;
 	$self->{workermethods} = {}; # announced worker methods
 
+	# announce internal methods
 	$self->register('rpcswitch.announce', sub { $self->rpc_announce(@_) }, non_blocking => 1, state => 'auth');
 	$self->register('rpcswitch.hello', sub { $self->rpc_hello(@_) }, non_blocking => 1);
 	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
-	#$rpc->register('*', sub { $self->rpc_catchall(@_) }, non_blocking => 1, state => 'auth');
 	$self->register('rpcswitch.withdraw', sub { $self->rpc_withdraw(@_) }, state => 'auth');
 
-	my $serveropts = { port => ( $cfg->{rpcswitch}->{listenport} // 6551 ) };
-	$serveropts->{address} = $cfg->{rpcswitch}->{listenaddress} if $cfg->{api}->{listenaddress};
-	if ($cfg->{api}->{tls_key}) {
-		$serveropts->{tls} = 1;
-		$serveropts->{tls_key} = $cfg->{api}->{tls_key};
-		$serveropts->{tls_cert} = $cfg->{api}->{tls_cert};
-	}
-	if ($cfg->{api}->{tls_ca}) {
-		#$serveropts->{tls_verify} = 0; # cheating..
-		$serveropts->{tls_ca} = $cfg->{api}->{tls_ca};
-	}
-
-	$self->{server} = Mojo::IOLoop->server(
-		$serveropts => sub {
-			my ($loop, $stream, $id) = @_;
-			my $client = RPC::Switch::Connection->new($self, $stream, $id);
-			$client->on(close => sub { $self->_disconnect($client) });
-			#$self->clients->{refaddr($client)} = $client;
+	die "no listen configuration?" unless ref $cfg->{listen} eq 'ARRAY';
+	my @servers;
+	for my $l (@{$cfg->{listen}}) {
+		my $serveropts = { port => ( $l->{port} // 6551 ) };
+		$serveropts->{address} = $l->{address} if $l->{address};
+		if ($l->{tls_key}) {
+			$serveropts->{tls} = 1;
+			$serveropts->{tls_key} = $l->{tls_key};
+			$serveropts->{tls_cert} = $l->{tls_cert};
 		}
-	) or die 'no server?';
+		if ($l->{tls_ca}) {
+			#$serveropts->{tls_verify} = 0; # cheating..
+			$serveropts->{tls_ca} = $l->{tls_ca};
+		}
+		my $localname = $l->{name} // (($serveropts->{address} // '0') . ':' . $serveropts->{port});
+
+		my $server = Mojo::IOLoop->server(
+			$serveropts => sub {
+				my ($loop, $stream, $id) = @_;
+				my $client = RPC::Switch::Connection->new($self, $stream, $localname);
+				$client->on(close => sub { $self->_disconnect($client) });
+				#$self->clients->{refaddr($client)} = $client;
+			}
+		) or die 'no server?';
+		push @servers, $server;
+	}
+	$self->{servers} = \@servers;
 
 	$self->{auth} = RPC::Switch::Auth->new(
-		$cfgdir, $cfg, 'rpcswitch|auth',
+		$cfgdir, $cfg, 'auth',
 	) or die 'no auth?';
 
 	# add a catch all error handler..
@@ -188,31 +185,22 @@ sub new {
 	return $self;
 }
 
-sub load_config {
-	my ($self, $path) = @_;
+sub _load_config {
+	my ($self) = @_;
 
-	#my $cfg = Mojo::File->new($path)->slurp();
-	#die "no cfg" unless $cfg;
-	#say $cfg;
+	my $path = $self->{methodpath}
+		or die 'no methodpath?';
 
-	our ($acl, $backend2acl, $cnmap, $method2acl, $methods, $workers);
+	my $slurp = Mojo::File->new($path)->slurp();
 
-	local $@;
+	my ($acl, $backend2acl, $method2acl, $methods);
+
 	local $SIG{__WARN__} = sub { die @_ };
-	#eval {
-	#	use strict;
-	#	eval $cfg;
-	#	1;
-	#} or die "eval failed $@?";
-	#die "eval got $@" if $@;
 
-	eval {require $path} or die "failed to load config $path: $@\n";
+	eval $slurp;
 
-	#print 'acl         ', Dumper($acl);
-	print 'backend2acl ', Dumper($backend2acl);
-	#print 'cnmap       ', Dumper($cnmap);
-	print 'method2acl  ', Dumper($method2acl);
-	#print 'methods     ', Dumper($methods);
+	die "error loading method config: $@" if $@;
+	die 'emtpy method config?' unless $acl && $backend2acl && $method2acl && $methods;
 
 	# reverse the acl hash: create a hash of users with a hash of acls
 	# these users belong to as values
@@ -230,7 +218,7 @@ sub load_config {
 				#say "including acl $1";
 				die "acl depth exceeded for $1" if ++$i > 10;
 				my $b2 = $acl->{$1};
-				die "unknon acl $1" unless $b2;
+				die "unknown acl $1" unless $b2;
 				push @tmp, ((ref $b2 eq 'ARRAY') ? @$b2 : $b2);
 			} else {
 				push @users, $_
@@ -267,6 +255,7 @@ sub load_config {
 		}
 	}
 
+	# namespace magic
 	my %methods;
 	while (my ($namespace, $ms) = each(%$methods)) {
 		while (my ($m, $b) = each(%$ms)) {
@@ -275,10 +264,19 @@ sub load_config {
 		}
 	}
 
-	$self->{who2acl} = \%who2acl;
+	if ($self->{debug}) {
+		my $log = $self->{log};
+		$log->debug('acl         ' . Dumper($acl));
+		$log->debug('backend2acl ' . Dumper($backend2acl));
+		$log->debug('method2acl  ' . Dumper($method2acl));
+		$log->debug('methods     ' . Dumper($methods));
+		$log->debug('who2acl     ' . Dumper(\%who2acl));
+	}
+
 	$self->{backend2acl} = $backend2acl;
 	$self->{method2acl} = $method2acl;
 	$self->{methods} = \%methods;
+	$self->{who2acl} = \%who2acl;
 }
 
 sub work {
@@ -291,7 +289,16 @@ sub work {
 		$self->_shutdown(@_);
 	};
 
-	$self->log->debug('RPC::Switch starting work');
+	local $SIG{HUP} = sub {
+		$self->log->info('trying to reload config');
+		local $@;
+		eval {
+			$self->_load_config();
+		};
+		$self->log->error("config reload failed: $@") if $@;
+	};
+
+	$self->log->info('RPC::Switch starting work');
 	Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
 	#my $reactor = Mojo::IOLoop->singleton->reactor;
 	#$reactor->{running}++;
@@ -323,7 +330,7 @@ sub rpc_hello {
 			$con->who($who);
 			$con->reqauth($reqauth);
 			$con->state('auth');
-			$rpccb->(JSON->true, "welcome to the clientapi $who!");
+			$rpccb->(JSON->true, "welcome to the rpcswitch $who!");
 		} else {
 			$self->log->debug("hello failed for $who: method $method msg $msg");
 			$con->state(undef);
@@ -341,22 +348,22 @@ sub _checkacl {
 	
 	$acl = [$acl] unless ref $acl;	
 
-	say "check if $who is in any of ('", join("', '", @$acl), "')";
+	#say "check if $who is in any of ('", join("', '", @$acl), "')";
 
 	my $a = $self->{who2acl}->{$who} // { public => 1 };
 
-	say "$who is in ('", join("', '", keys %$a), "')";
+	#say "$who is in ('", join("', '", keys %$a), "')";
 
 	my @matches = grep { defined } @{$a}{@$acl};
 	
-	print 'matches: ', Dumper(\@matches);
+	#print  'matches: ', Dumper(\@matches);
 
 	return (scalar @matches > 0);
 }
 
 sub rpc_announce {
 	my ($self, $con, $req, $i, $rpccb) = @_;
-	say 'announce from ', $con->who;
+	$self->log->info("announce from $con->{who} ($con->{from})");
 	my $method = $i->{method} or die 'method required';
 	my $slots      = $i->{slots} // 1;
 	my $workername = $i->{workername} // $con->workername // $con->who;
@@ -431,30 +438,11 @@ sub rpc_withdraw {
 	# remove this action from the clients action list
 	delete $con->methods->{$method};
 
-	#my $listenstring = $wa->listenstring or die "unknown listenstring";
-
-	#my ($res) = $self->pg->db->query(
-	#		q[select withdraw($1, $2)],
-	#		$client->workername,
-	#		$method
-	#	)->array;
-	#die "no result" unless $res and @$res;
-	
 	# now remove this workeraction from the listenstring workeraction list
 	my $l = $self->workermethods->{$method};
 	my @idx = grep { refaddr $$l[$_] == refaddr $wm } 0..$#$l;
 	splice @$l, $_, 1 for @idx;
 	delete $self->workermethods->{$method} unless @$l;
-
-	# delete if the listenstring client list is now empty
-	#unless (@$l) {
-	#	delete $self->listenstrings->{$listenstring};
-	#	delete $self->methods->{$method};
-	#	# not much we can do about pending jobs now..
-	#	delete $self->pending->{$listenstring};
-	#	$self->pg->pubsub->unlisten($listenstring);
-	#	$self->log->debug("unlisten $listenstring");
-	#}		
 
 	if (not $con->methods and $con->tmr) {
 		# cleanup ping timer if client has no more actions
@@ -477,7 +465,7 @@ sub _ping {
 	},
 	sub {
 		my ($d, $e, $r) = @_;
-		#print 'got ', Dumper(\@_);
+		#print  'got ', Dumper(\@_);
 		if ($e and $e eq 'timeout') {
 			$self->log->info('uhoh, ping timeout for ' . $con->who);
 			Mojo::IOLoop->remove($con->id); # disconnect
@@ -488,7 +476,6 @@ sub _ping {
 			}
 			$self->log->debug('got ' . $r . ' from ' . $con->who . ' : ping(' . $con->worker_id . ')');
 			Mojo::IOLoop->remove($tmr);
-			#$self->pg->db->query(q[select ping($1)], $client->worker_id, $d->begin);
 		}
 	});
 }
@@ -565,7 +552,7 @@ sub _handle_internal_request {
 	local $@;
 	my @ret = eval { $m->{cb}->($c, $r, $r->{params}, $cb)};
 	return $self->_error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
-	#say STDERR 'method returned: ', Dumper(\@ret);
+	#$self->log->debug('method returned: '. Dumper(\@ret));
 	
 	return $self->_result($c, $id, \@ret) if !$cb and $id;
 	return;
@@ -577,7 +564,7 @@ sub _handle_request {
 	my $method = $request->{method} or die 'huh?';
 	my $id = $request->{id};
 
-	#print 'methods: ', Dumper($self->methods);
+	#print  'methods: ', Dumper($self->methods);
 
 	my $backend = $self->methods->{$method};
 	#return $self->_error($c, $id, ERR_METHOD, 'Method not found.') unless $backend;
@@ -602,12 +589,12 @@ sub _handle_request {
 	return $self->_error($c, $id, ERR_NOTAL, "acl $acl does not allow method $method for $who")
 		unless $self->_checkacl($acl, $who);
 
-	#print 'workermethods: ', Dumper($self->workermethods);
+	#print  'workermethods: ', Dumper($self->workermethods);
 
 	# todo: implement filtering here
 	my $l = $self->workermethods->{$backend};
 
-	#print 'l: ', Dumper($l);
+	#print  'l: ', Dumper($l);
 
 	return return $self->_error($c, $id, ERR_NOWORKER, "No worker avaiable for $backend.") unless $l and @$l;
 
@@ -725,7 +712,7 @@ sub _error {
 sub _result {
 	my ($self, $c, $id, $result) = @_;
 	$result = $$result[0] if scalar(@$result) == 1;
-	#say STDERR Dumper($result) if $self->{debug};
+	#$self->log->debug('_result: ' . Dumper($result));
 	$c->_write(encode_json({
 		jsonrpc	    => '2.0',
 		id	    => $id,
@@ -736,7 +723,8 @@ sub _result {
 
 sub _disconnect {
 	my ($self, $client) = @_;
-	$self->log->info('oh my.... ' . ($client->who // 'somebody') . ' disonnected..');
+	$self->log->info('oh my.... ' . ($client->who // 'somebody')
+				. ' (' . $client->from . ') disonnected..');
 
 	return unless $client->who;
 
@@ -747,7 +735,7 @@ sub _disconnect {
 	}
 
 	for my $c (values %{$client->channels}) {
-		say 'contemplating ', $c;
+		#say 'contemplating ', $c;
 		my $vci = $c->vci;
 		my $reqs = $c->reqs;
 		my ($con, $dir);
@@ -767,19 +755,9 @@ sub _disconnect {
 		}
 		$con->notify('rpcswitch.channel_gone', {channel => $vci});
 		delete $con->channels->{$vci};
-		#delete $self->channels->{$c->vci};
+		#delete $self->channels->{$vci};
 		$c->delete();
 	}
-
-	# meh.. expensive..
-	#for my $c (values %{$self->channels}) {
-	#	if (refaddr($c->client) == refaddr($client) or
-	#	    refaddr($c->worker) == refaddr($client)) {
-	#		delete $self->channels->{$c->vci};
-	#	}
-	#}
-
-	#delete $self->clients->{refaddr($client)};
 }
 
 

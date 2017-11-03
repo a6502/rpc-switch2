@@ -17,34 +17,31 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-has [qw(channels id log methods ns owner ping reqauth state stream switch tmr who workername worker_id)];
+has [qw(channels from localname log methods ns owner ping reqauth
+	 state stream switch tmr who workername worker_id)];
 
 sub new {
 	my $self = shift->SUPER::new();
-	my ($switch, $stream, $id) = @_;
+	my ($switch, $stream, $localname) = @_;
 	#say 'new connection!';
 	die 'no stream?' unless $stream and $stream->can('write');
+	my $handle = $stream->handle;
 	my $ns = MojoX::NetstringStream->new(
 		stream => $stream
 	);
-	#my $con = $rpc->newconnection(
-	#	owner => $self,
-	#	write => sub { $ns->write(@_) },
-	#);
 	$ns->on(chunk => sub {
 		my ($ns, $chunk) = @_;
 		# Process input chunk
 		#$self->log->debug("    got chunk: $chunk");
-		#my @err = $con->handle($chunk);
 		my @err = $self->handle($chunk);
 		$self->log->error(join(' ', grep defined, @err[1..$#err])) if @err;
-		#$ns->close if $err[0];
 		$self->close if $err[0];
 	});
 	$ns->on(close => sub { $self->_on_close(@_) });
-	
+
 	$self->{channels} = {};
-	$self->{id} = $id;
+	$self->{from} = $handle->peerhost .':'. $handle->peerport;
+	$self->{localname} = $localname;
 	$self->{log} = $switch->log;
 	$self->{ns} = $ns;
 	$self->{ping} = 60; # fixme: configurable?
@@ -52,8 +49,7 @@ sub new {
 	$self->{stream} = $stream;
 	$self->{switch} = $switch;
 
-	my $handle = $stream->handle;
-	$self->log->info('new connection '. $self .' from '. $handle->peerhost .':'. $handle->peerport);
+	$self->log->info('new connection on '. $localname . ' (' . $self .') from '. $self->{from});
 
 	# fixme: put this in a less hidden place?
 	$self->notify('rpcswitch.greetings', {who =>'rpcswitch', version => '1.0'});
@@ -116,12 +112,14 @@ sub _handle {
 	my ($self, $r) = @_;
 	return 'not a json object' if ref $r ne 'HASH';
 	return 'expected jsonrpc version 2.0' unless defined $r->{jsonrpc} and $r->{jsonrpc} eq '2.0';
-	return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
+	# id can be null
+	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
+	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
 	if (defined $r->{rpcswitch}) {
 		return $self->switch->_handle_channel($self, $r);
 	} elsif (defined $r->{method}) {
 		return $self->switch->_handle_request($self, $r);
-	} elsif (defined $r->{id} and (exists $r->{result} or defined $r->{error})) {
+	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {
 		return $self->_handle_response($r);
 	} else {
 		return 'invalid jsonnrpc object';
