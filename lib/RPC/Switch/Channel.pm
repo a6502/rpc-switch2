@@ -8,9 +8,9 @@ sub delete {
 	%$self = ();
 }
 
-sub DESTROY {
-	my $self = shift;
-	say 'destroying ', $self;
-}
+#sub DESTROY {
+#	my $self = shift;
+#	say 'destroying ', $self;
+#}
 
 1;
