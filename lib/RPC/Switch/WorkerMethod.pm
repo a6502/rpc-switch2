@@ -1,16 +1,7 @@
 package RPC::Switch::WorkerMethod;
 use Mojo::Base -base;
 
-has [qw(connection method)];
-
-sub update {
-	my ($self, %attr) = @_;
-	my ($k,$v);
-	while (($k, $v) = each %attr) {
-		$self->{$k} = $v;
-	}
-	return $self;
-}
+has [qw(connection filterkey filtervalue method)];
 
 #sub DESTROY {
 #	my $self = shift;
