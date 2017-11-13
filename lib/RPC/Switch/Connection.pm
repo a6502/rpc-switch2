@@ -10,15 +10,17 @@ use Scalar::Util qw(refaddr);
 
 # cpan
 use JSON::MaybeXS;
-use MojoX::NetstringStream;
+use MojoX::NetstringStream 0.05;
 
+# keep in sync with RPC::Switch
 use constant {
+	ERR_TOOBIG   => -32010, # Req/Resp object too big
 	ERR_REQ      => -32600, # The JSON sent is not a valid Request object 
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-has [qw(channels from localname log methods ns owner ping reqauth
-	 state stream switch tmr who workername worker_id)];
+has [qw(channels debug from localname log methods ns ping refcount
+	reqauth state stream switch tmr who workername worker_id)];
 
 sub new {
 	my $self = shift->SUPER::new();
@@ -26,30 +28,50 @@ sub new {
 	#say 'new connection!';
 	die 'no stream?' unless $stream and $stream->can('write');
 	my $handle = $stream->handle;
+	my $from = $handle->peerhost .':'. $handle->peerport;
 	my $ns = MojoX::NetstringStream->new(
-		stream => $stream
+		stream => $stream,
+		maxsize => 999999, # fixme: configurable?
 	);
 	$ns->on(chunk => sub {
 		my ($ns, $chunk) = @_;
 		# Process input chunk
-		#$self->log->debug("    got chunk: $chunk");
-		my @err = $self->handle($chunk);
+		$self->log->debug("    handle: $chunk") if $self->{debug};
+		local $@;
+		my $r = eval { decode_json($chunk) };
+		my @err;
+		if ($@) {
+			@err = $self->_error(undef, ERR_PARSE, "json decode failed: $@");
+		} else {
+			@err = $self->_handle($r);
+			@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
+				if $err[0];
+		}
 		$self->log->error(join(' ', grep defined, @err[1..$#err])) if @err;
 		$self->close if $err[0];
+		return;
 	});
 	$ns->on(close => sub { $self->_on_close(@_) });
+	$ns->on(nserr => sub {
+		my ($ns, $msg) = @_;
+		$self->log->error("$from ($self): $msg");
+		$self->_error(undef, ERR_TOOBIG, $msg);
+		$self->close;
+	});
 
 	$self->{channels} = {};
-	$self->{from} = $handle->peerhost .':'. $handle->peerport;
+	$self->{debug} = $switch->{debug};
+	$self->{from} = $from;
 	$self->{localname} = $localname;
 	$self->{log} = $switch->log;
 	$self->{ns} = $ns;
 	$self->{ping} = 60; # fixme: configurable?
 	$self->{methods} = {};
+	$self->{refcount} = 0;
 	$self->{stream} = $stream;
 	$self->{switch} = $switch;
 
-	$self->log->info('new connection on '. $localname . ' (' . $self .') from '. $self->{from});
+	$self->log->info('new connection on '. $localname . ' (' . $self .') from '. $from);
 
 	# fixme: put this in a less hidden place?
 	$self->notify('rpcswitch.greetings', {who =>'rpcswitch', version => '1.0'});
@@ -69,7 +91,6 @@ sub call {
 	
 	my $request = {
 		jsonrpc => '2.0',
-		rpcswitch => JSON->true,
 		method => $name,
 		params => $args,
 		id  => $id,
@@ -99,7 +120,7 @@ sub notify {
 
 sub handle {
 	my ($self, $json) = @_;
-	$self->log->debug("    handle: $json");
+	$self->log->debug("    handle: $json") if $self->{debug};
 	local $@;
 	my $r = eval { decode_json($json) };
 	return $self->_error(undef, ERR_PARSE, "json decode failed: $@") if $@;
@@ -116,9 +137,9 @@ sub _handle {
 	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
 	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
 	if (defined $r->{rpcswitch}) {
-		return $self->switch->_handle_channel($self, $r);
+		return $self->{switch}->_handle_channel($self, $r);
 	} elsif (defined $r->{method}) {
-		return $self->switch->_handle_request($self, $r);
+		return $self->{switch}->_handle_request($self, $r);
 	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {
 		return $self->_handle_response($r);
 	} else {
@@ -169,7 +190,8 @@ sub _error {
 
 sub _write {
 	my $self = shift;
-	$self->log->debug('    writing: ' . join('', @_));
+	$self->log->debug('    writing: ' . join('', @_))
+		if $self->{debug};
 	$self->{ns}->write(@_);
 }
 
@@ -185,10 +207,9 @@ sub close {
 	$self->stream->close_gracefully;
 }
 
-sub DESTROY {
-	my $self = shift;
-	say 'destroying ', $self;
-	%$self = ();
-}
+#sub DESTROY {
+#	my $self = shift;
+#	say 'destroying ', $self;
+#}
 
 1;
