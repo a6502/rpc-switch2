@@ -2,4 +2,7 @@
 *.bak
 *.old
 *.ffweg
+etc/*
 tmp/*
+nytprof.out
+nytprof/*
