@@ -20,7 +20,7 @@ sub main {
 	my $cfgdir = realpath("$FindBin::Bin/../etc/");
 	my $cfgfile = 'config.pl';
 	my $daemonize = 0;
-	my $debug = 1;
+	my $debug = 0;
 
 	GetOptions(
 		'cfgdir=s' => \$cfgdir,

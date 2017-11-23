@@ -43,7 +43,7 @@ sub new {
 		if ($@) {
 			@err = $self->_error(undef, ERR_PARSE, "json decode failed: $@");
 		} else {
-			@err = $self->_handle($r);
+			@err = $self->_handle(\$chunk, $r);
 			@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
 				if $err[0];
 		}
@@ -118,26 +118,26 @@ sub notify {
 	return;
 }
 
-sub handle {
-	my ($self, $json) = @_;
-	$self->log->debug("    handle: $json") if $self->{debug};
-	local $@;
-	my $r = eval { decode_json($json) };
-	return $self->_error(undef, ERR_PARSE, "json decode failed: $@") if $@;
-	my @err = $self->_handle($r);
-	return $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0]) if $err[0];
-        return @err;
-}
+#sub handle {
+#	my ($self, $json) = @_;
+#	$self->log->debug("    handle: $json") if $self->{debug};
+#	local $@;
+#	my $r = eval { decode_json($json) };
+#	return $self->_error(undef, ERR_PARSE, "json decode failed: $@") if $@;
+#	my @err = $self->_handle($r);
+#	return $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0]) if $err[0];
+#        return @err;
+#}
 
 sub _handle {
-	my ($self, $r) = @_;
+	my ($self, $jsonr, $r) = @_;
 	return 'not a json object' if ref $r ne 'HASH';
 	return 'expected jsonrpc version 2.0' unless defined $r->{jsonrpc} and $r->{jsonrpc} eq '2.0';
 	# id can be null
 	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
 	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
 	if (defined $r->{rpcswitch}) {
-		return $self->{switch}->_handle_channel($self, $r);
+		return $self->{switch}->_handle_channel($self, $jsonr, $r);
 	} elsif (defined $r->{method}) {
 		return $self->{switch}->_handle_request($self, $r);
 	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {

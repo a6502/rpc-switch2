@@ -688,12 +688,13 @@ sub _handle_request {
 	};
 	
 	# forward request to worker
-	$wcon->_write(encode_json($workerrequest));
+	#$wcon->_write(encode_json($workerrequest));
+	$wcon->{ns}->write(encode_json($workerrequest));
 	return; # exlplicit empty return
 }
 
 sub _handle_channel {
-	my ($self, $c, $r) = @_;
+	my ($self, $c, $jsonr, $r) = @_;
 	my $debug = $self->{debug};
 	$self->log->debug('    in handle_channel') if $debug;
 	my $rpcswitch = $r->{rpcswitch};
@@ -746,7 +747,8 @@ sub _handle_channel {
 	#print Dumper($chan->reqs);
 	# forward request
 	# we could spare a encode here if we pass the original request along?
-	$con->_write(encode_json($r));
+	#$con->_write(encode_json($r));
+	$con->{ns}->write($$jsonr);
 	return;
 }
 
