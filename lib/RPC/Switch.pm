@@ -277,11 +277,6 @@ sub work {
 
 	$self->log->info('RPC::Switch starting work');
 	Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
-	#my $reactor = Mojo::IOLoop->singleton->reactor;
-	#$reactor->{running}++;
-	#while($reactor->{running}) {
-	#	$reactor->one_tick();
-	#}
 	$self->log->info('RPC::Switch done?');
 
 	return 0;
@@ -436,7 +431,6 @@ sub rpc_announce {
 sub rpc_withdraw {
 	my ($self, $con, $m, $i) = @_;
 	my $method = $i->{method} or die 'method required';
-	# find listenstring by method
 
 	my $wm = $con->methods->{$method} or die "unknown method";
 	# remove this action from the clients action list
@@ -486,7 +480,7 @@ sub rpc_withdraw {
 sub _ping {
 	my ($self, $con) = @_;
 	my $tmr;
-	Mojo::IOLoop->delay->steps(sub {
+	Mojo::IOLoop->delay(sub {
 		my $d = shift;
 		my $e = $d->begin;
 		$tmr = Mojo::IOLoop->timer(10 => sub { $e->(@_, 'timeout') } );
