@@ -512,7 +512,7 @@ sub _shutdown {
 	Mojo::IOLoop->stop;
 }
 
-# register internal rpcswitch.* requests
+# register internal rpcswitch.* methods
 sub register {
 	my ($self, $name, $cb, %opts) = @_;
 	my %defaults = ( 
@@ -527,7 +527,7 @@ sub register {
 	croak 'a non_blocking notification is not sensible'
 		if $opts{non_blocking} and $opts{notification};
 	croak "internal methods need to start with rpcswitch." unless $name =~ /^rpcswitch\./;
-	croak "procedure $name already registered" if $self->{internal}->{$name};
+	croak "method $name already registered" if $self->{internal}->{$name};
 	$self->{internal}->{$name} = { 
 		name => $name,
 		cb => $cb,
