@@ -22,5 +22,5 @@ This software is distributed under the Artistic License 2.0.
 
 ## ACKNOWLEDGEMENT
 
-This software has been developed with support from STRATO <https://www.strato.com/>.
+This software has been developed with support from STRATO <https://www.strato.com/>.  
 In German: Diese Software wurde mit Unterstützung von STRATO <https://www.strato.de/> entwickelt.
