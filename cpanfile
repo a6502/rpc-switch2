@@ -4,7 +4,7 @@
 
 requires 'JSON::MaybeXS', '1.003008';
 
-requires 'Mojolicious', '6.66';
+requires 'Mojolicious', '7.55';
 
 requires 'MojoX::NetstringStream', '0.05';
 

@@ -77,6 +77,14 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
+# keep in sync with the RPC::Switch::Client
+use constant {
+	RES_OK => 'RES_OK',
+	RES_WAIT => 'RES_WAIT',
+	RES_ERROR => 'RES_ERROR',
+	RES_OTHER => 'RES_OTHER', # 'dunno'
+};
+
 sub new {
 	my ($class, %args) = @_;
 	my $self = $class->SUPER::new();
@@ -121,6 +129,8 @@ sub new {
 
 	# announce internal methods
 	$self->register('rpcswitch.announce', sub { $self->rpc_announce(@_) }, non_blocking => 1, state => 'auth');
+	$self->register('rpcswitch.get_method_details', sub { $self->rpc_get_method_details(@_) }, state => 'auth');
+	$self->register('rpcswitch.get_methods', sub { $self->rpc_get_methods(@_) }, state => 'auth');
 	$self->register('rpcswitch.hello', sub { $self->rpc_hello(@_) }, non_blocking => 1);
 	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
 	$self->register('rpcswitch.withdraw', sub { $self->rpc_withdraw(@_) }, state => 'auth');
@@ -233,9 +243,13 @@ sub _load_config {
 	# namespace magic
 	my %methods;
 	while (my ($namespace, $ms) = each(%$methods)) {
-		while (my ($m, $b) = each(%$ms)) {
-			$b = "$b$m" if $b =~ '\.$';
-			$methods{"$namespace.$m"} = $b;
+		while (my ($m, $md) = each(%$ms)) {
+			$md = { b => $md } if not ref $md;
+			my $be = $md->{b};
+			die "invalid metod details for $namespace.$m: missing backend"
+				unless $be;
+			$md->{b} = "$be$m" if $be =~ '\.$';
+			$methods{"$namespace.$m"} = $md;
 		}
 	}
 
@@ -287,7 +301,6 @@ sub rpc_ping {
 	return 'pong?';
 }
 
-
 sub rpc_hello {
 	my ($self, $con, $r, $args, $rpccb) = @_;
 	#$self->log->debug('rpc_hello: '. Dumper($args));
@@ -313,6 +326,81 @@ sub rpc_hello {
 			$rpccb->(JSON->false, 'you\'re not welcome!');
 		}
 	});
+}
+
+sub rpc_get_method_details {
+	my ($self, $con, $r, $i, $cb) = @_;
+
+	my $who = $con->who;
+
+	my $method = $i->{method} or die 'method required';
+
+	my $md = $self->{methods}->{$method}
+		or die "method $method not found";
+
+	$method =~ /^([^.]+)\..*$/
+		or die "no namespace in $method?";
+	my $ns = $1;
+
+	my $acl = $self->{method2acl}->{$method}
+		  // $self->{method2acl}->{"$ns.*"}
+		  // die "no method acl for $method";
+
+	die "acl $acl does not allow calling of $method by $who"
+		unless $self->_checkacl($acl, $con->who);
+
+	$md = { %$md }; # copy
+
+	# now find a backend
+	my $backend = $md->{b};
+
+	my $l = $self->{workermethods}->{$backend};
+
+	if ($l) {
+		if (ref $l eq 'HASH') {
+			my $dummy;
+			# filtering
+			($dummy, $l) = each %$l;
+		}
+		if (ref $l eq 'ARRAY' and @$l) {
+			my $wm = $$l[0];
+			$md->{doc} = $wm->{doc}
+				// 'no documentation available';
+		}
+	} else {
+		$md->{msg} = 'no backend worker available';
+	}
+
+
+	# follow the rpc-switch calling conventions here
+	return (RES_OK, $md);
+}
+
+sub rpc_get_methods {
+	my ($self, $con, $r, $i) = @_;
+
+	print 'r: ', Dumper($r);
+
+	my $who = $con->who;
+	my $methods = $self->{methods};
+	print 'methods: ', Dumper($methods);
+	my @m;
+
+	for my $method ( keys %$methods ) {
+		$method =~ /^([^.]+)\..*$/
+			or next;
+		my $ns = $1;
+		my $acl = $self->{method2acl}->{$method}
+			  // $self->{method2acl}->{"$ns.*"}
+			  // next;
+
+		next unless $self->_checkacl($acl, $who);
+
+		push @m, { $method => ( $methods->{$method}->{d} // 'undocumented method' ) };
+	}
+
+	# follow the rpc-switch calling conventions here
+	return (RES_OK, \@m);
 }
 
 sub _checkacl_slow {
@@ -343,8 +431,8 @@ sub _checkacl {
 sub rpc_announce {
 	my ($self, $con, $req, $i, $rpccb) = @_;
 	my $method = $i->{method} or die 'method required';
-	$self->log->info("announce of $method from $con->{who} ($con->{from})");
-	my $slots      = $i->{slots} // 1;
+	my $who = $con->who;
+	$self->log->info("announce of $method from $who ($con->{from})");
 	my $workername = $i->{workername} // $con->workername // $con->who;
 	my $filter     = $i->{filter};
 	my $worker_id = $con->worker_id;
@@ -366,7 +454,6 @@ sub rpc_announce {
 		  // $self->{backend2acl}->{"$ns.*"}
 		  // die "no backend acl for $method";
 
-	my $who = $con->who;
 	die "acl $acl does not allow announce of $method by $who"
 		unless $self->_checkacl($acl, $con->who);
 
@@ -402,6 +489,7 @@ sub rpc_announce {
 	my $wm = RPC::Switch::WorkerMethod->new(
 		method => $method,
 		connection => $con,
+		doc => $i->{doc},
 		($filterkey ? (
 			filterkey => $filterkey,
 			filtervalue => $filtervalue
@@ -425,7 +513,7 @@ sub rpc_announce {
 	}
 	$rpccb->(JSON->true, { msg => 'success', worker_id => $worker_id });
 
-	return
+	return;
 }
 
 sub rpc_withdraw {
@@ -519,6 +607,7 @@ sub register {
 		by_name => 1,
 		non_blocking => 0,
 		notification => 0,
+		raw => 0,
 		state => undef,
 	);
 	croak 'no self?' unless $self;
@@ -534,6 +623,7 @@ sub register {
 		by_name => $opts{by_name},
 		non_blocking => $opts{non_blocking},
 		notification => $opts{notification},
+		raw => $opts{raw},
 		state => $opts{state},
 	};
 }
@@ -556,6 +646,20 @@ sub _handle_internal_request {
 	return $self->_error($c, $id, ERR_BADSTATE, 'This method requires connection state ' . ($m->{state} // 'undef'))
 		if $m->{state} and not ($c->state and $m->{state} eq $c->state);
 
+	if ($m->{raw}) {
+		my $cb;
+		$cb = sub { $c->write(encode_json($_[0])) if $id } if $m->{non_blocking};
+
+		local $@;
+		#my @ret = eval { $m->{cb}->($c, $jsonr, $r, $cb)};
+		my @ret = eval { $m->{cb}->($c, $r, $cb)};
+		return $self->_error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
+		#say STDERR 'method returned: ', Dumper(\@ret);
+
+		$c->write(encode_json($ret[0])) if !$cb and $id;
+		return
+	}
+
 	my $cb;
 	$cb = sub { $self->_result($c, $id, \@_) if $id; } if $m->{non_blocking};
 
@@ -577,7 +681,7 @@ sub _handle_request {
 
 	#print  'methods: ', Dumper($self->methods);
 
-	my $backend = $self->{methods}->{$method};
+	my $backend = $self->{methods}->{$method}->{b};
 	#return $self->_error($c, $id, ERR_METHOD, 'Method not found.') unless $backend;
 	return $self->_handle_internal_request($c, $request) unless $backend;
 

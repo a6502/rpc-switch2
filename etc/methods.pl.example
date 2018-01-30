@@ -10,7 +10,14 @@ $methods = {
 		'power' => 'bar.square',
 		# call bar.add for foo.add
 		'add' => 'bar.',
-		'div' => 'bar.',
+		'div' => { # more elaborate method details
+			# backend
+			b => 'bar.',
+			# contact
+			c => 'you@example.com',
+			# description
+			d => 'divides dividend by divisor',
+		},
 	},
 };
 
