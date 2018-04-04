@@ -5,9 +5,10 @@ package RPC::Switch;
 # without some handholding. We either can try to detect EV and do the
 # handholding, or try to prevent Mojo using EV.
 #
-BEGIN {
-	$ENV{'MOJO_REACTOR'} = 'Mojo::Reactor::Poll';
-}
+#BEGIN {
+#	$ENV{'MOJO_REACTOR'} = 'Mojo::Reactor::Poll';
+#}
+# we do the handholding now..
 
 # mojo (from cpan)
 use Mojo::Base -base;
@@ -274,6 +275,17 @@ sub work {
 	my ($self) = @_;
 	if ($self->daemon) {
 		daemonize();
+	}
+
+	if (Mojo::IOLoop->singleton->reactor->isa('Mojo::Reactor::EV')) {
+		$self->log->info('Mojo::Reactor::EV detected, enabling workarounds');
+		#Mojo::IOLoop->recurring(1 => sub {
+		#	$self->log->debug('--tick--') if $self->{debug}
+		#});
+		$self->{__async_check} = EV::check(sub {
+			#$self->log->debug('--tick--') if $self->{debug};
+			1;
+		});
 	}
 
 	local $SIG{TERM} = local $SIG{INT} = sub {
