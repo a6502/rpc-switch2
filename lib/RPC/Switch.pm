@@ -132,6 +132,7 @@ sub new {
 	$self->register('rpcswitch.announce', sub { $self->rpc_announce(@_) }, non_blocking => 1, state => 'auth');
 	$self->register('rpcswitch.get_method_details', sub { $self->rpc_get_method_details(@_) }, state => 'auth');
 	$self->register('rpcswitch.get_methods', sub { $self->rpc_get_methods(@_) }, state => 'auth');
+	$self->register('rpcswitch.get_workers', sub { $self->rpc_get_workers(@_) }, state => 'auth');
 	$self->register('rpcswitch.hello', sub { $self->rpc_hello(@_) }, non_blocking => 1);
 	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
 	$self->register('rpcswitch.withdraw', sub { $self->rpc_withdraw(@_) }, state => 'auth');
@@ -391,11 +392,9 @@ sub rpc_get_method_details {
 sub rpc_get_methods {
 	my ($self, $con, $r, $i) = @_;
 
-	print 'r: ', Dumper($r);
-
 	my $who = $con->who;
 	my $methods = $self->{methods};
-	print 'methods: ', Dumper($methods);
+	#print 'methods: ', Dumper($methods);
 	my @m;
 
 	for my $method ( keys %$methods ) {
@@ -415,6 +414,36 @@ sub rpc_get_methods {
 	return (RES_OK, \@m);
 }
 
+sub rpc_get_workers {
+	my ($self, $con, $r, $i) = @_;
+
+	#my $who = $con->who;
+	my $workermethods = $self->{workermethods};
+	#print 'workermethods: ', Dumper($workermethods);
+	my %workers;
+
+	for my $l ( values %$workermethods ) {
+		if (ref $l eq 'ARRAY' and @$l) {
+			#print 'l : ', Dumper($l);
+			for my $wm (@$l) {
+				push @{$workers{$wm->connection->workername}}, $wm->method;
+			}
+		} elsif (ref $l eq 'HASH') {
+			# filtering
+			keys %$l; # reset each
+			while (my ($f, $wl) = each %$l) {
+				for my $wm (@$wl) {
+					push @{$workers{$wm->connection->workername}}, [$wm->method, $f];
+				}
+			}
+		}
+	}
+
+	# follow the rpc-switch calling conventions here
+	return (RES_OK, \%workers);
+}
+
+# kept as a debuging reference..
 sub _checkacl_slow {
 	my ($self, $acl, $who) = @_;
 	
@@ -547,7 +576,7 @@ sub rpc_withdraw {
 
 	my $wmh = $self->{workermethods};
 	my $l;
-	if (my $fv =$wm->filtervalue) {
+	if (my $fv = $wm->filtervalue) {
 		$l = $wmh->{$method}->{$fv};
 		if ($#$l) {
 			my $rwm = refaddr $wm;
