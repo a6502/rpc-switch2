@@ -6,6 +6,7 @@ use Mojo::IOLoop;
 use Carp;
 use Data::Dumper;
 use Digest::MD5 qw(md5_base64);
+use Encode qw(encode_utf8 decode_utf8);
 use Scalar::Util qw(refaddr);
 
 # cpan
@@ -36,7 +37,7 @@ sub new {
 	$ns->on(chunk => sub {
 		my ($ns, $chunk) = @_;
 		# Process input chunk
-		$self->log->debug("    handle: $chunk") if $self->{debug};
+		$self->log->debug("    handle: " . decode_utf8($chunk)) if $self->{debug};
 		local $@;
 		my $r = eval { decode_json($chunk) };
 		my @err;
@@ -190,7 +191,7 @@ sub _error {
 
 sub _write {
 	my $self = shift;
-	$self->log->debug('    writing: ' . join('', @_))
+	$self->log->debug('    writing: ' . decode_utf8(join('', @_)))
 		if $self->{debug};
 	$self->{ns}->write(@_);
 }

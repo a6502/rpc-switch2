@@ -808,13 +808,9 @@ sub _handle_request {
 	}
 	$wcon->{refcount}++ if $id;
 	$channel->{reqs}->{$id} = 1 if $id;
-	if ($debug) {
-		$self->log->debug("refcount connection $wcon $wcon->{refcount}");
-		$self->log->debug("refcount channel $channel " . scalar keys %{$channel->reqs});
-	}
 
 	# rewrite request to add rcpswitch information
-	my $workerrequest = {
+	my $workerrequest = encode_json({
 		jsonrpc => '2.0',
 		rpcswitch => {
 			vcookie => 'eatme', # channel information version
@@ -824,11 +820,17 @@ sub _handle_request {
 		method => $backend,
 		params => $request->{params},
 		id  => $id,
-	};
-	
+	});
+
 	# forward request to worker
+	if ($debug) {
+		$self->log->debug("refcount connection $wcon $wcon->{refcount}");
+		$self->log->debug("refcount channel $channel " . scalar keys %{$channel->reqs});
+		$self->log->debug('    writing: ' . decode_utf8($workerrequest));
+	}
+
 	#$wcon->_write(encode_json($workerrequest));
-	$wcon->{ns}->write(encode_json($workerrequest));
+	$wcon->{ns}->write($workerrequest);
 	return; # exlplicit empty return
 }
 
@@ -882,6 +884,7 @@ sub _handle_channel {
 	if ($debug) {
 		$self->log->debug("refcount connection $c $c->{refcount}");
 		$self->log->debug("refcount $chan " . scalar keys %{$chan->reqs});
+		$self->log->debug('    writing: ' . decode_utf8($$jsonr));
 	}
 	#print Dumper($chan->reqs);
 	# forward request
