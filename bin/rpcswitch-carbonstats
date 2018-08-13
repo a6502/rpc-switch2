@@ -26,7 +26,7 @@ exit main(@ARGV);
 
 sub main {
 	my $cfgfile = realpath("$FindBin::Bin/../etc/config-carbonstats.pl");
-	my $debug = 1;
+	my $debug = 0;
 
 	GetOptions(
 		'config=s' => \$cfgfile,
@@ -109,7 +109,7 @@ sub do_stats {
 		my $hostname = $cfg->{carbon}->{hostname} // Sys::Hostname::hostname();
 		while (my ($k,$v) = each %$outargs) {
 			$_ = "rpcswitch.$hostname.$k $v ". int(time()) . "\n";
-			say;
+			$log->debug($_);
 			$stream->write($_);
 		}
 	}, sub {
