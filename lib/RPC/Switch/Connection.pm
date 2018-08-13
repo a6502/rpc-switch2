@@ -137,6 +137,7 @@ sub _handle {
 	# id can be null
 	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
 	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
+	$self->{switch}->{chunks}++;
 	if (defined $r->{rpcswitch}) {
 		return $self->{switch}->_handle_channel($self, $jsonr, $r);
 	} elsif (defined $r->{method}) {

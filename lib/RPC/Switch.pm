@@ -42,7 +42,9 @@ has [qw(
 	backendacl
 	backendfilter
 	cfg
-	channels
+	chunks
+	clients
+	connections
 	daemon
 	debug
 	internal
@@ -120,7 +122,9 @@ sub new {
 	die 'method config failed to load?' unless $self->{methods};
 
 	# keep sorted
-	$self->{channels} = {}; # channels we know about
+	$self->{chunks} = 0; # how many json chunks we handled
+	$self->{clients} = {}; # connected clients
+	$self->{connections} = 0; # how many connections we've had
 	$self->{internal} = {}; # rpcswitch.x internal methods
 	$self->{pid_file} = $pid_file if $daemon;
 	$self->{ping} = $args{ping} || 60;
@@ -130,8 +134,10 @@ sub new {
 
 	# announce internal methods
 	$self->register('rpcswitch.announce', sub { $self->rpc_announce(@_) }, non_blocking => 1, state => 'auth');
+	$self->register('rpcswitch.get_clients', sub { $self->rpc_get_clients(@_) }, state => 'auth');
 	$self->register('rpcswitch.get_method_details', sub { $self->rpc_get_method_details(@_) }, state => 'auth');
 	$self->register('rpcswitch.get_methods', sub { $self->rpc_get_methods(@_) }, state => 'auth');
+	$self->register('rpcswitch.get_stats', sub { $self->rpc_get_stats(@_) }, state => 'auth');
 	$self->register('rpcswitch.get_workers', sub { $self->rpc_get_workers(@_) }, state => 'auth');
 	$self->register('rpcswitch.hello', sub { $self->rpc_hello(@_) }, non_blocking => 1);
 	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
@@ -158,7 +164,8 @@ sub new {
 				my ($loop, $stream, $id) = @_;
 				my $client = RPC::Switch::Connection->new($self, $stream, $localname);
 				$client->on(close => sub { $self->_disconnect($client) });
-				#$self->clients->{refaddr($client)} = $client;
+				$self->{connections}++;
+				$self->clients->{refaddr($client)} = $client;
 			}
 		) or die 'no server?';
 		push @servers, $server;
@@ -341,6 +348,27 @@ sub rpc_hello {
 	});
 }
 
+sub rpc_get_clients {
+	my ($self, $con, $r, $i) = @_;
+
+	#my $who = $con->who;
+	# fixme: acl for this?
+	my %clients;
+
+	for my $c ( values %{$self->{clients}} ) {
+		$clients{$c->{from}} = {
+			localname => $c->{localname},
+			(%{$c->{methods}} ? (methods => [keys %{$c->{methods}}]) : ()),
+			num_chan => scalar keys %{$c->{channels}},
+			who => $c->{who},
+			($c->{workername} ? (workername => $c->{workername}) : ()),
+		}
+	}
+
+	# follow the rpc-switch calling conventions here
+	return (RES_OK, \%clients);
+}
+
 sub rpc_get_method_details {
 	my ($self, $con, $r, $i, $cb) = @_;
 
@@ -412,6 +440,22 @@ sub rpc_get_methods {
 
 	# follow the rpc-switch calling conventions here
 	return (RES_OK, \@m);
+}
+
+sub rpc_get_stats {
+	my ($self, $con, $r, $i) = @_;
+
+	#my $who = $con->who;
+	# fixme: acl for stats?
+
+	my %stats = (
+		chunks => $self->{chunks},
+		clients => scalar keys %{$self->{clients}},
+		connections => $self->{connections},
+	);
+
+	# follow the rpc-switch calling conventions here
+	return (RES_OK, \%stats);
 }
 
 sub rpc_get_workers {
@@ -949,6 +993,7 @@ sub _disconnect {
 		#delete $self->channels->{$vci};
 		$c->delete();
 	}
+	delete $self->clients->{refaddr($client)};
 }
 
 
