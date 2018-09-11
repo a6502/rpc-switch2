@@ -60,7 +60,7 @@ sub main {
 	# so no ping timer at the api side
 
 	# hack alert: (ab)using the internals
-	$client->{_exit} = RPC::Switch::Client::WORK_OK;
+	$client->{_exit} = $RPC::Switch::Client::WORK_OK;
 	$ioloop->start();
 
 	return $client->{_exit};
@@ -82,7 +82,6 @@ sub do_stats {
 	#say 'do_stats1!';
 	$ioloop->delay(sub{
 		my ($d) = @_;
-		#say 'do_stats2!';
 		$client->call_nb(
 			method => 'rpcswitch.get_stats',
 			inargs => {},
@@ -90,7 +89,6 @@ sub do_stats {
 		);
 	}, sub {
 		my ($d, $status, $outargs) = @_;
-		#say 'do_stats3!';
 		unless ($status and $status eq RPC::Switch::Client::RES_OK) {
 			die "huuh: status " . ($status // '<undef>') . ' : ' . ($outargs // '');
 		}
@@ -102,25 +100,25 @@ sub do_stats {
 		);
 	}, sub {
 		my ($d, $outargs, $err, $stream) = @_;
-		#say 'do_stats4! ', Dumper($outargs);
 		die $err if $err;
-		$stream->on(drain => $d->begin(0));
 		keys %$outargs;
 		my $hostname = $cfg->{carbon}->{hostname} // Sys::Hostname::hostname();
+		my $out = '';
 		while (my ($k,$v) = each %$outargs) {
-			$_ = "rpcswitch.$hostname.$k $v ". int(time()) . "\n";
+			$_ = "rpcswitch.$hostname.$k $v ". int(time());
 			$log->debug($_);
-			$stream->write($_);
+			$out .= "$_\n";
 		}
+		$stream->on(drain => $d->begin(0));
+		#$stream->on(close => sub {say 'do_stats: close!'});
+		$stream->write($out);
 	}, sub {
 		my ($d, $stream) = @_;
-		#say 'do_stats5!';
-		$stream->close_gracefully();
+		$stream->close();
 	})->catch(sub{
 		my @reason = @_;
 		warn "Something went wrong: $reason[0]";
 	});
-	#say 'do_stats-1!';
 }
 
 
