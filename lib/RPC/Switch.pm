@@ -56,6 +56,7 @@ has [qw(
 	servers
 	timeout
 	worker_id
+	workers
 	workermethods
 )];
 
@@ -130,6 +131,7 @@ sub new {
 	$self->{ping} = $args{ping} || 60;
 	$self->{timeout} = $args{timeout} // 60; # 0 is a valid timeout?
 	$self->{worker_id} = 0; # global worker_id counter
+	$self->{workers} = 0; # count of connected workers
 	$self->{workermethods} = {}; # announced worker methods
 
 	# announce internal methods
@@ -358,7 +360,7 @@ sub rpc_get_clients {
 	for my $c ( values %{$self->{clients}} ) {
 		$clients{$c->{from}} = {
 			localname => $c->{localname},
-			(%{$c->{methods}} ? (methods => [keys %{$c->{methods}}]) : ()),
+			(($c->{methods} && %{$c->{methods}}) ? (methods => [keys %{$c->{methods}}]) : ()),
 			num_chan => scalar keys %{$c->{channels}},
 			who => $c->{who},
 			($c->{workername} ? (workername => $c->{workername}) : ()),
@@ -448,10 +450,20 @@ sub rpc_get_stats {
 	#my $who = $con->who;
 	# fixme: acl for stats?
 
+	my $methods = $self->{methods};
+	keys %$methods; #reset
+	my ($k, $v, %m);
+	while ( ($k, $v) = each(%$methods) ) {
+		$v = $v->{'#'};
+		$m{$k} = $v if $v;
+	}
+
 	my %stats = (
 		chunks => $self->{chunks},
 		clients => scalar keys %{$self->{clients}},
 		connections => $self->{connections},
+		workers => $self->{workers},
+		methods => \%m,
 	);
 
 	# follow the rpc-switch calling conventions here
@@ -522,8 +534,10 @@ sub rpc_announce {
 	my $filter     = $i->{filter};
 	my $worker_id = $con->worker_id;
 	unless ($worker_id) {
+		# it's a new worker: assign id
 		$worker_id = ++$self->{worker_id};
 		$con->worker_id($worker_id);
+		$self->{workers}++; # and count
 	}
 	$self->log->debug("worker_id: $worker_id");
 
@@ -614,6 +628,8 @@ sub rpc_withdraw {
 		$self->log->debug("remove tmr $con->{tmr}");
 		Mojo::IOLoop->remove($con->{tmr});
 		delete $con->{tmr};
+		# and reduce worker count
+		$self->{workers}--;
 	}
 
 	# now remove this workeraction from the listenstring workeraction list
@@ -764,11 +780,12 @@ sub _handle_request {
 	my $method = $request->{method} or die 'huh?';
 	my $id = $request->{id};
 
-	#print  'methods: ', Dumper($self->methods);
-
-	my $backend = $self->{methods}->{$method}->{b};
-	#return $self->_error($c, $id, ERR_METHOD, 'Method not found.') unless $backend;
-	return $self->_handle_internal_request($c, $request) unless $backend;
+	my ($backend, $md);
+	unless ($md = $self->{methods}->{$method}) {
+		# try it as an internal method then
+		return $self->_handle_internal_request($c, $request);
+	}
+	$backend = $self->{methods}->{$method}->{b};
 
 	$self->log->debug("rpc_catchall for $method") if $debug;
 
@@ -808,12 +825,12 @@ sub _handle_request {
 
 		$l = $self->{workermethods}->{$backend}->{$fv};
 
-		return return $self->_error($c, $id, ERR_NOWORKER,
+		return $self->_error($c, $id, ERR_NOWORKER,
 			"No worker available after filtering on $fk for backend $backend")
 				unless $l and @$l;
 	} else {
 		$l = $self->{workermethods}->{$backend};
-		return return $self->_error($c, $id, ERR_NOWORKER, "No worker available for $backend.")
+		return $self->_error($c, $id, ERR_NOWORKER, "No worker available for $backend.")
 			unless $l and @$l;
 	}
 
@@ -850,8 +867,11 @@ sub _handle_request {
 			$wcon->channels->{$vci} =
 				$channel;
 	}
-	$wcon->{refcount}++ if $id;
-	$channel->{reqs}->{$id} = 1 if $id;
+	if ($id) {
+		$wcon->{refcount}++;
+		$channel->{reqs}->{$id} = 1;
+	}
+	$md->{'#'}++;
 
 	# rewrite request to add rcpswitch information
 	my $workerrequest = encode_json({
