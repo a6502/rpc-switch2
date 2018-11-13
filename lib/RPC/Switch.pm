@@ -338,7 +338,7 @@ sub rpc_get_clients {
 
 	for my $c ( values %{$self->{clients}} ) {
 		$clients{$c->{from}} = {
-			localname => $c->{localname},
+			localname => $c->{server}->{localname},
 			(($c->{methods} && %{$c->{methods}}) ? (methods => [keys %{$c->{methods}}]) : ()),
 			num_chan => scalar keys %{$c->{channels}},
 			who => $c->{who},
