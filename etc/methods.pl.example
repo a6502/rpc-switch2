@@ -26,8 +26,9 @@ $acl = {
 	'addbar' => ['+bar', 'deArbeider'],
 	'bar' => [qw( theEmployee derArbeitnehmer )],
 	'klant' => [qw( deKlant theCustomer )],
+	'prov' => [qw( prov )],
 	# everyone is in acl public
-	# 'public' => '*',
+	'public' => '*',
 };
 
 # which acls are allowed to call which methods
@@ -46,5 +47,5 @@ $backend2acl = {
 
 # which backend methods require filtering of which field
 $backendfilter = {
-	'bar.square' => 'foo',
+	#'bar.square' => 'foo',
 };

@@ -11,6 +11,7 @@ $cfg = {
 			# default values:
 			#address => '127.0.0.1',
 			#port => 6551,
+			# auth => ['all'],
 		},
 		{
 			address => '127.0.0.1',
@@ -25,10 +26,14 @@ $cfg = {
 	auth => {
 		# authentication methods supported
 		password => 'RPC::Switch::Auth::Passwd',
+		clientcert => 'RPC::Switch::Auth::ClientCert',
 	},
 	# per authentication method configuration
 	'auth|password' => {
-		pwfile => 'api.passwd'
-	}
+		pwfile => 'switch.passwd'
+	},
+	'auth|clientcert' => {
+		cnfile => 'switch.cnfile'
+	},
 };
 
