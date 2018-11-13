@@ -20,12 +20,13 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-has [qw(channels debug from localname log methods ns ping refcount
-	reqauth state stream switch tmr who workername worker_id)];
+has [qw(channels debug from log methods ns ping refcount reqauth server
+	state stream switch tmr who workername worker_id)];
 
 sub new {
 	my $self = shift->SUPER::new();
-	my ($switch, $stream, $localname) = @_;
+	my ($server, $stream) = @_;
+	my $switch = $server->switch;
 	#say 'new connection!';
 	die 'no stream?' unless $stream and $stream->can('write');
 	my $handle = $stream->handle;
@@ -63,16 +64,16 @@ sub new {
 	$self->{channels} = {};
 	$self->{debug} = $switch->{debug};
 	$self->{from} = $from;
-	$self->{localname} = $localname;
 	$self->{log} = $switch->log;
 	$self->{ns} = $ns;
 	$self->{ping} = 60; # fixme: configurable?
 	$self->{methods} = {};
 	$self->{refcount} = 0;
+	$self->{server} = $server;
 	$self->{stream} = $stream;
 	$self->{switch} = $switch;
 
-	$self->log->info('new connection on '. $localname . ' (' . $self .') from '. $from);
+	$self->log->info('new connection on '. $server->localname . ' (' . $self .') from '. $from);
 
 	# fixme: put this in a less hidden place?
 	$self->notify('rpcswitch.greetings', {who =>'rpcswitch', version => '1.0'});

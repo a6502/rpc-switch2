@@ -34,6 +34,7 @@ use JSON::MaybeXS;
 use RPC::Switch::Auth;
 use RPC::Switch::Channel;
 use RPC::Switch::Connection;
+use RPC::Switch::Server;
 use RPC::Switch::WorkerMethod;
 
 has [qw(
@@ -145,38 +146,16 @@ sub new {
 	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
 	$self->register('rpcswitch.withdraw', sub { $self->rpc_withdraw(@_) }, state => 'auth');
 
-	die "no listen configuration?" unless ref $cfg->{listen} eq 'ARRAY';
-	my @servers;
-	for my $l (@{$cfg->{listen}}) {
-		my $serveropts = { port => ( $l->{port} // 6551 ) };
-		$serveropts->{address} = $l->{address} if $l->{address};
-		if ($l->{tls_key}) {
-			$serveropts->{tls} = 1;
-			$serveropts->{tls_key} = $l->{tls_key};
-			$serveropts->{tls_cert} = $l->{tls_cert};
-		}
-		if ($l->{tls_ca}) {
-			#$serveropts->{tls_verify} = 0; # cheating..
-			$serveropts->{tls_ca} = $l->{tls_ca};
-		}
-		my $localname = $l->{name} // (($serveropts->{address} // '0') . ':' . $serveropts->{port});
-
-		my $server = Mojo::IOLoop->server(
-			$serveropts => sub {
-				my ($loop, $stream, $id) = @_;
-				my $client = RPC::Switch::Connection->new($self, $stream, $localname);
-				$client->on(close => sub { $self->_disconnect($client) });
-				$self->{connections}++;
-				$self->clients->{refaddr($client)} = $client;
-			}
-		) or die 'no server?';
-		push @servers, $server;
-	}
-	$self->{servers} = \@servers;
-
 	$self->{auth} = RPC::Switch::Auth->new(
 		$cfgdir, $cfg, 'auth',
 	) or die 'no auth?';
+
+	die "no listen configuration?" unless ref $cfg->{listen} eq 'ARRAY';
+	my @servers;
+	for my $l (@{$cfg->{listen}}) {
+		push @servers, RPC::Switch::Server->new($self, $l);
+	}
+	$self->{servers} = \@servers;
 
 	return $self;
 }
@@ -333,13 +312,13 @@ sub rpc_hello {
 	$self->auth->authenticate($method, $con, $who, $token, sub {
 		my ($res, $msg, $reqauth) = @_;
 		if ($res) {
-			$self->log->debug("hello from $who succeeded: method $method msg $msg");
+			$self->log->info("hello from $who succeeded: method $method msg $msg");
 			$con->who($who);
 			$con->reqauth($reqauth);
 			$con->state('auth');
 			$rpccb->(JSON->true, "welcome to the rpcswitch $who!");
 		} else {
-			$self->log->debug("hello failed for $who: method $method msg $msg");
+			$self->log->info("hello failed for $who: method $method msg $msg");
 			$con->state(undef);
 			# close the connecion after sending the response
 			Mojo::IOLoop->next_tick(sub {
