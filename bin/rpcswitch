@@ -27,13 +27,12 @@ sub main {
 		'debug' => \$debug,
 	) or die "Error in command line arguments\n";
 
-	my $switch = RPC::Switch->new(
+	RPC::Switch::init(
 		cfgdir => $cfgdir,
 		cfgfile => $cfgfile,
 		daemon => $daemonize,
 		debug => $debug,
-	);
-	die 'no RPC Switch?' unless $switch;
+	) or die 'no RPC Switch?';
 
-	return $switch->work();
+	return RPC::Switch::work();
 }

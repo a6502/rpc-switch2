@@ -11,7 +11,7 @@ package RPC::Switch;
 # we do the handholding now..
 
 # mojo (from cpan)
-use Mojo::Base -base;
+use Mojo::Base -strict;
 use Mojo::File;
 use Mojo::IOLoop;
 use Mojo::Log;
@@ -28,7 +28,9 @@ use List::Util qw(shuffle);
 use Scalar::Util qw(refaddr);
 
 # more cpan
+use Clone::PP qw(clone);
 use JSON::MaybeXS;
+use Ref::Util qw(is_arrayref is_coderef is_hashref);
 
 # RPC Switch aka us
 use RPC::Switch::Auth;
@@ -36,30 +38,6 @@ use RPC::Switch::Channel;
 use RPC::Switch::Connection;
 use RPC::Switch::Server;
 use RPC::Switch::WorkerMethod;
-
-has [qw(
-	apiname
-	auth
-	backendacl
-	backendfilter
-	cfg
-	chunks
-	clients
-	connections
-	daemon
-	debug
-	internal
-	log
-	methodacl
-	methods
-	pid_file
-	ping
-	servers
-	timeout
-	worker_id
-	workers
-	workermethods
-)];
 
 use constant {
 	ERR_NOTNOT   => -32000, # Not a notification
@@ -90,9 +68,33 @@ use constant {
 	RES_OTHER => 'RES_OTHER', # 'dunno'
 };
 
-sub new {
-	my ($class, %args) = @_;
-	my $self = $class->SUPER::new();
+# lotsa globals
+our (
+	$auth,
+	$backend2acl,
+	$backendfilter,
+	$cfg,
+	$chunks,
+	$clients,
+	$connections,
+	$debug,
+	$internal,
+	$ioloop,
+	$last_worker_id,
+	$log,
+	$method2acl,
+	$methodpath,
+	$methods,
+	$ping,
+	$servers,
+	$timeout,
+	$who2acl,
+	$workers,
+	$workermethods,
+);
+
+sub init {
+	my (%args) = @_;
 
 	my $cfgdir = $args{cfgdir};
 	die "no configdir?" unless $cfgdir;
@@ -100,75 +102,67 @@ sub new {
 	my $cfgpath = "$cfgdir/$cfgfile";
 
 	my $slurp = Mojo::File->new($cfgpath)->slurp();
-	my $cfg;
 	local $@;
 	eval $slurp;
 	die "failed to load config $cfgpath: $@\n" if $@;
-	die "empty config $cfgpath?" unless $cfg;
-	$self->{cfg} = $cfg;
+	die "empty config $cfgpath?" unless is_hashref($cfg);
 
-	my $apiname = $self->{apiname} = ($args{apiname} || fileparse($0)); # . " [$$]";
-	my $daemon = $self->{daemon} = $args{daemon} // 0; # or 1?
-	my $debug = $self->{debug} = $args{debug} // 0; # or 1?
+	$debug = $args{debug}; # // 1;
 
-	my $log = $self->{log} = $args{log} // Mojo::Log->new(level => ($debug) ? 'debug' : 'info');
-	$log->path(realpath("$FindBin::Bin/../log/$apiname.log")) if $daemon;
-
-	my $pid_file = $cfg->{pid_file} // realpath("$FindBin::Bin/../log/$apiname.pid");
-	die "$apiname already running?" if $daemon and check_pid($pid_file);
+	$log = $args{log} // Mojo::Log->new(level => ($debug) ? 'debug' : 'info');
+	$log->path($args{logfile}) if $args{logfile};
 
 	#print Dumper($cfg);
 	my $methodcfg = $cfg->{methods} or die 'no method configuration?';
-	$self->{methodpath} = "$cfgdir/$methodcfg";
-	$self->_load_config();
-	die 'method config failed to load?' unless $self->{methods};
+	$methodpath = "$cfgdir/$methodcfg";
+	_load_config();
+	die 'method config failed to load?' unless is_hashref($methods);
 
+	# exlicitly initialize everything here so that a re-init has a chance of working
 	# keep sorted
-	$self->{chunks} = 0; # how many json chunks we handled
-	$self->{clients} = {}; # connected clients
-	$self->{connections} = 0; # how many connections we've had
-	$self->{internal} = {}; # rpcswitch.x internal methods
-	$self->{pid_file} = $pid_file if $daemon;
-	$self->{ping} = $args{ping} || 60;
-	$self->{timeout} = $args{timeout} // 60; # 0 is a valid timeout?
-	$self->{worker_id} = 0; # global worker_id counter
-	$self->{workers} = 0; # count of connected workers
-	$self->{workermethods} = {}; # announced worker methods
+	$chunks = 0; # how many json chunks we handled
+	$clients = {}; # connected clients
+	$connections = 0; # how many connections we've had
+	$internal = {}; # rpcswitch.x internal methods
+	$ioloop = $args{ioloop} // Mojo::IOLoop->singleton; # laziness
+	$last_worker_id = 0; # last assigned worker_id
+	$ping = $args{ping} || 60;
+	$timeout = $args{timeout} // 60; # 0 is a valid timeout?
+	$workers = 0; # count of connected workers
+	$workermethods = {}; # announced worker methods
 
 	# announce internal methods
-	$self->register('rpcswitch.announce', sub { $self->rpc_announce(@_) }, non_blocking => 1, state => 'auth');
-	$self->register('rpcswitch.get_clients', sub { $self->rpc_get_clients(@_) }, state => 'auth');
-	$self->register('rpcswitch.get_method_details', sub { $self->rpc_get_method_details(@_) }, state => 'auth');
-	$self->register('rpcswitch.get_methods', sub { $self->rpc_get_methods(@_) }, state => 'auth');
-	$self->register('rpcswitch.get_stats', sub { $self->rpc_get_stats(@_) }, state => 'auth');
-	$self->register('rpcswitch.get_workers', sub { $self->rpc_get_workers(@_) }, state => 'auth');
-	$self->register('rpcswitch.hello', sub { $self->rpc_hello(@_) }, non_blocking => 1);
-	$self->register('rpcswitch.ping', sub { $self->rpc_ping(@_) });
-	$self->register('rpcswitch.withdraw', sub { $self->rpc_withdraw(@_) }, state => 'auth');
+	_register('rpcswitch.announce', \&rpc_announce, non_blocking => 1, state => 'auth');
+	_register('rpcswitch.get_clients', \&rpc_get_clients, state => 'auth');
+	_register('rpcswitch.get_method_details', \&rpc_get_method_details, state => 'auth');
+	_register('rpcswitch.get_methods', \&rpc_get_methods, state => 'auth');
+	_register('rpcswitch.get_stats', \&rpc_get_stats, state => 'auth');
+	_register('rpcswitch.get_workers', \&rpc_get_workers, state => 'auth');
+	_register('rpcswitch.hello', \&rpc_hello, non_blocking => 1);
+	_register('rpcswitch.ping', \&rpc_ping);
+	_register('rpcswitch.withdraw', \&rpc_withdraw, state => 'auth');
 
-	$self->{auth} = RPC::Switch::Auth->new(
+	$auth = RPC::Switch::Auth->new(
 		$cfgdir, $cfg, 'auth',
 	) or die 'no auth?';
 
-	die "no listen configuration?" unless ref $cfg->{listen} eq 'ARRAY';
+	die "no listen configuration?" unless is_arrayref($cfg->{listen});
 	my @servers;
 	for my $l (@{$cfg->{listen}}) {
-		push @servers, RPC::Switch::Server->new($self, $l);
+		push @servers, RPC::Switch::Server->new($l);
 	}
-	$self->{servers} = \@servers;
+	$servers = \@servers;
 
-	return $self;
+	return JSON->true;
 }
 
 sub _load_config {
-	my ($self) = @_;
+	die 'no methodpath?' unless $methodpath;
 
-	my $path = $self->{methodpath}
-		or die 'no methodpath?';
+	my $slurp = Mojo::File->new($methodpath)->slurp();
 
-	my $slurp = Mojo::File->new($path)->slurp();
-
-	my ($acl, $backend2acl, $backendfilter, $method2acl, $methods);
+	#my ($acl, $backend2acl, $backendfilter, $method2acl, $methods);
+	my $acl;
 
 	local $SIG{__WARN__} = sub { die @_ };
 
@@ -186,7 +180,7 @@ sub _load_config {
 		my @acls = ($a, 'public');
 		my @users;
 		my $i = 0;
-		my @tmp = ((ref $b eq 'ARRAY') ? @$b : ($b));
+		my @tmp = (is_arrayref($b) ? @$b : ($b));
 		while ($_ = shift @tmp) {
 			#say "doing $_";
 			if (/^\+(.*)$/) {
@@ -194,7 +188,7 @@ sub _load_config {
 				die "acl depth exceeded for $1" if ++$i > 10;
 				my $b2 = $acl->{$1};
 				die "unknown acl $1" unless $b2;
-				push @tmp, ((ref $b2 eq 'ARRAY') ? @$b2 : $b2);
+				push @tmp, (is_arrayref($b2) ? @$b2 : $b2);
 			} else {
 				push @users, $_
 			}
@@ -243,8 +237,7 @@ sub _load_config {
 		}
 	}
 
-	if ($self->{debug}) {
-		my $log = $self->{log};
+	if ($debug) {
 		$log->debug('acl           ' . Dumper($acl));
 		$log->debug('backend2acl   ' . Dumper($backend2acl));
 		$log->debug('backendfilter ' . Dumper($backendfilter));
@@ -253,75 +246,68 @@ sub _load_config {
 		$log->debug('who2acl       ' . Dumper(\%who2acl));
 	}
 
-	$self->{backend2acl} = $backend2acl;
-	$self->{backendfilter} = $backendfilter;
-	$self->{method2acl} = $method2acl;
-	$self->{methods} = \%methods;
-	$self->{who2acl} = \%who2acl;
+	$methods = \%methods;
+	$who2acl = \%who2acl;
 }
 
 sub work {
-	my ($self) = @_;
-	if ($self->daemon) {
-		daemonize();
-	}
 
 	if (Mojo::IOLoop->singleton->reactor->isa('Mojo::Reactor::EV')) {
-		$self->log->info('Mojo::Reactor::EV detected, enabling workarounds');
+		$log->info('Mojo::Reactor::EV detected, enabling workarounds');
 		#Mojo::IOLoop->recurring(1 => sub {
-		#	$self->log->debug('--tick--') if $self->{debug}
+		#	$log->debug('--tick--') if $debug
 		#});
-		$self->{__async_check} = EV::check(sub {
-			#$self->log->debug('--tick--') if $self->{debug};
+		$RPC::Switch::__async_check = EV::check(sub {
+			#$log->debug('--tick--') if $debug;
 			1;
 		});
 	}
 
-	local $SIG{TERM} = local $SIG{INT} = sub {
-		$self->_shutdown(@_);
-	};
+	local $SIG{TERM} = local $SIG{INT} = \&_shutdown;
 
 	local $SIG{HUP} = sub {
-		$self->log->info('trying to reload config');
+		$log->info('trying to reload config');
 		local $@;
 		eval {
-			$self->_load_config();
+			_load_config();
 		};
-		$self->log->error("config reload failed: $@") if $@;
+		$log->error("config reload failed: $_") if $@;
 	};
 
-	$self->log->info('RPC::Switch starting work');
-	Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
-	$self->log->info('RPC::Switch done?');
+	$log->info('RPC::Switch starting work');
+	$ioloop->start unless $ioloop->is_running;
+	$log->info('RPC::Switch done?');
 
 	return 0;
 }
 
 sub rpc_ping {
-	my ($self, $c, $r, $i, $rpccb) = @_;
+	#my ($c, $r, $i, $rpccb) = @_;
+	# fixme: shouldn't this  be
+	# return (RES_OK, 'pong?'); 
 	return 'pong?';
 }
 
 sub rpc_hello {
-	my ($self, $con, $r, $args, $rpccb) = @_;
-	#$self->log->debug('rpc_hello: '. Dumper($args));
+	my ($con, $r, $args, $rpccb) = @_;
+	#$log->debug('rpc_hello: '. Dumper($args));
 	my $who = $args->{who} or die "no who?";
 	my $method = $args->{method} or die "no method?";
 	my $token = $args->{token} or die "no token?";
 
-	$self->auth->authenticate($method, $con, $who, $token, sub {
+	$auth->authenticate($method, $con, $who, $token, sub {
 		my ($res, $msg, $reqauth) = @_;
 		if ($res) {
-			$self->log->info("hello from $who succeeded: method $method msg $msg");
+			$log->info("hello from $who succeeded: method $method msg $msg");
 			$con->who($who);
 			$con->reqauth($reqauth);
 			$con->state('auth');
 			$rpccb->(JSON->true, "welcome to the rpcswitch $who!");
 		} else {
-			$self->log->info("hello failed for $who: method $method msg $msg");
+			$log->info("hello failed for $who: method $method msg $msg");
 			$con->state(undef);
 			# close the connecion after sending the response
-			Mojo::IOLoop->next_tick(sub {
+			$ioloop->next_tick(sub {
 				$con->close;
 			});
 			$rpccb->(JSON->false, 'you\'re not welcome!');
@@ -330,14 +316,14 @@ sub rpc_hello {
 }
 
 sub rpc_get_clients {
-	my ($self, $con, $r, $i) = @_;
+	my ($con, $r, $i) = @_;
 
 	#my $who = $con->who;
 	# fixme: acl for this?
-	my %clients;
+	my %res;
 
-	for my $c ( values %{$self->{clients}} ) {
-		$clients{$c->{from}} = {
+	for my $c ( values %$clients ) {
+		$res{$c->{from}} = {
 			localname => $c->{server}->{localname},
 			(($c->{methods} && %{$c->{methods}}) ? (methods => [keys %{$c->{methods}}]) : ()),
 			num_chan => scalar keys %{$c->{channels}},
@@ -347,44 +333,44 @@ sub rpc_get_clients {
 	}
 
 	# follow the rpc-switch calling conventions here
-	return (RES_OK, \%clients);
+	return (RES_OK, \%res);
 }
 
 sub rpc_get_method_details {
-	my ($self, $con, $r, $i, $cb) = @_;
+	my ($con, $r, $i, $cb) = @_;
 
 	my $who = $con->who;
 
 	my $method = $i->{method} or die 'method required';
 
-	my $md = $self->{methods}->{$method}
+	my $md = $methods->{$method}
 		or die "method $method not found";
 
 	$method =~ /^([^.]+)\..*$/
 		or die "no namespace in $method?";
 	my $ns = $1;
 
-	my $acl = $self->{method2acl}->{$method}
-		  // $self->{method2acl}->{"$ns.*"}
+	my $acl = $method2acl->{$method}
+		  // $method2acl->{"$ns.*"}
 		  // die "no method acl for $method";
 
 	die "acl $acl does not allow calling of $method by $who"
-		unless $self->_checkacl($acl, $con->who);
+		unless checkacl($acl, $con->who);
 
-	$md = { %$md }; # copy
+	$md = clone($md); # copy to clobber
 
 	# now find a backend
 	my $backend = $md->{b};
 
-	my $l = $self->{workermethods}->{$backend};
+	my $l = $workermethods->{$backend};
 
 	if ($l) {
-		if (ref $l eq 'HASH') {
+		if (is_hashref($l)) {
 			my $dummy;
 			# filtering
 			($dummy, $l) = each %$l;
 		}
-		if (ref $l eq 'ARRAY' and @$l) {
+		if (is_arrayref($l) and @$l) {
 			my $wm = $$l[0];
 			$md->{doc} = $wm->{doc}
 				// 'no documentation available';
@@ -399,22 +385,20 @@ sub rpc_get_method_details {
 }
 
 sub rpc_get_methods {
-	my ($self, $con, $r, $i) = @_;
+	my ($con, $r, $i) = @_;
 
 	my $who = $con->who;
-	my $methods = $self->{methods};
-	#print 'methods: ', Dumper($methods);
 	my @m;
 
 	for my $method ( keys %$methods ) {
 		$method =~ /^([^.]+)\..*$/
 			or next;
 		my $ns = $1;
-		my $acl = $self->{method2acl}->{$method}
-			  // $self->{method2acl}->{"$ns.*"}
+		my $acl = $method2acl->{$method}
+			  // $method2acl->{"$ns.*"}
 			  // next;
 
-		next unless $self->_checkacl($acl, $who);
+		next unless _checkacl($acl, $who);
 
 		push @m, { $method => ( $methods->{$method}->{d} // 'undocumented method' ) };
 	}
@@ -424,12 +408,11 @@ sub rpc_get_methods {
 }
 
 sub rpc_get_stats {
-	my ($self, $con, $r, $i) = @_;
+	my ($con, $r, $i) = @_;
 
 	#my $who = $con->who;
 	# fixme: acl for stats?
 
-	my $methods = $self->{methods};
 	keys %$methods; #reset
 	my ($k, $v, %m);
 	while ( ($k, $v) = each(%$methods) ) {
@@ -438,10 +421,10 @@ sub rpc_get_stats {
 	}
 
 	my %stats = (
-		chunks => $self->{chunks},
-		clients => scalar keys %{$self->{clients}},
-		connections => $self->{connections},
-		workers => $self->{workers},
+		chunks => $chunks,
+		clients => scalar keys %$clients,
+		connections => $connections,
+		workers => $workers,
 		methods => \%m,
 	);
 
@@ -450,10 +433,11 @@ sub rpc_get_stats {
 }
 
 sub rpc_get_workers {
-	my ($self, $con, $r, $i) = @_;
+	my ($con, $r, $i) = @_;
 
 	#my $who = $con->who;
-	my $workermethods = $self->{workermethods};
+	# fixme: acl for this?
+
 	#print 'workermethods: ', Dumper($workermethods);
 	my %workers;
 
@@ -480,13 +464,13 @@ sub rpc_get_workers {
 
 # kept as a debuging reference..
 sub _checkacl_slow {
-	my ($self, $acl, $who) = @_;
+	my ($acl, $who) = @_;
 	
 	#$acl = [$acl] unless ref $acl;
 	say "check if $who is in any of ('",
 		(ref $acl ? join("', '", @$acl) : $acl), "')";
 
-	my $a = $self->{who2acl}->{$who} // { public => 1 };
+	my $a = $who2acl->{$who} // { public => 1 };
 	say "$who is in ('", join("', '", keys %$a), "')";
 
 	#return scalar grep(defined, @{$a}{@$acl}) if ref $acl;
@@ -499,26 +483,26 @@ sub _checkacl_slow {
 }
 
 sub _checkacl {
-	my $a = $_[0]->{who2acl}->{$_[2]} // { public => 1 };
-	return scalar grep(defined, @{$a}{@{$_[1]}}) if ref $_[1];
-	return $a->{$_[1]};
+	my $a = $who2acl->{$_[1]} // { public => 1 };
+	return scalar grep(defined, @{$a}{@{$_[0]}}) if ref $_[0];
+	return $a->{$_[0]};
 }
 
 sub rpc_announce {
-	my ($self, $con, $req, $i, $rpccb) = @_;
+	my ($con, $req, $i, $rpccb) = @_;
 	my $method = $i->{method} or die 'method required';
 	my $who = $con->who;
-	$self->log->info("announce of $method from $who ($con->{from})");
+	$log->info("announce of $method from $who ($con->{from})");
 	my $workername = $i->{workername} // $con->workername // $con->who;
 	my $filter     = $i->{filter};
 	my $worker_id = $con->worker_id;
 	unless ($worker_id) {
 		# it's a new worker: assign id
-		$worker_id = ++$self->{worker_id};
+		$worker_id = ++$last_worker_id;
 		$con->worker_id($worker_id);
-		$self->{workers}++; # and count
+		$workers++; # and count
 	}
-	$self->log->debug("worker_id: $worker_id");
+	$log->debug("worker_id: $worker_id");
 
 	# check if namespace.method matches a backend2acl (maybe using a namespace.* wildcard)
 	# if not: fail
@@ -528,24 +512,24 @@ sub rpc_announce {
 		or die "no namespace in $method?";
 	my $ns = $1;
 
-	my $acl = $self->{backend2acl}->{$method}
-		  // $self->{backend2acl}->{"$ns.*"}
+	my $acl = $backend2acl->{$method}
+		  // $backend2acl->{"$ns.*"}
 		  // die "no backend acl for $method";
 
 	die "acl $acl does not allow announce of $method by $who"
-		unless $self->_checkacl($acl, $con->who);
+		unless _checkacl($acl, $con->who);
 
 	# now check for filtering
 
-	my $filterkey = $self->{backendfilter}->{$method}
-			// $self->{backendfilter}->{"$ns.*"};
+	my $filterkey = $backendfilter->{$method}
+			// $backendfilter->{"$ns.*"};
 
 	my $filtervalue;
 
 	if ( $filterkey ) {
-		$self->log->debug("looking for filterkey $filterkey");
+		$log->debug("looking for filterkey $filterkey");
 		if ($filter) {
-			die "filter should be a json object" unless ref $filter eq 'HASH';
+			die "filter should be a json object" unless is_arrayref($filter);
 			for (keys %$filter) {
 				die "filtering is not allowed on field $_ for method $method"
 					unless '' . $_ eq $filterkey;
@@ -580,22 +564,23 @@ sub rpc_announce {
 	$con->workername($workername) unless $con->workername;
 
 	if ($filterkey) {
-		push @{$self->workermethods->{$method}->{$filtervalue}}, $wm
+		push @{$workermethods->{$method}->{$filtervalue}}, $wm
 	} else {
-		push @{$self->workermethods->{$method}}, $wm;
+		push @{$workermethods->{$method}}, $wm;
 	}
 
 	# set up a ping timer to the client after the first succesfull announce
 	unless ($con->tmr) {
-		$con->{tmr} = Mojo::IOLoop->recurring( $con->ping, sub { $self->_ping($con) } );
+		$con->{tmr} = $ioloop->recurring( $con->ping, sub { _ping($con) } );
 	}
 	$rpccb->(JSON->true, { msg => 'success', worker_id => $worker_id });
 
+	# fixme: make non-async?
 	return;
 }
 
 sub rpc_withdraw {
-	my ($self, $con, $m, $i) = @_;
+	my ($con, $m, $i) = @_;
 	my $method = $i->{method} or die 'method required';
 
 	my $wm = $con->methods->{$method} or die "unknown method";
@@ -604,16 +589,16 @@ sub rpc_withdraw {
 
 	if (not %{$con->methods} and $con->{tmr}) {
 		# cleanup ping timer if client has no more actions
-		$self->log->debug("remove tmr $con->{tmr}");
-		Mojo::IOLoop->remove($con->{tmr});
+		$log->debug("remove tmr $con->{tmr}");
+		$ioloop->remove($con->{tmr});
 		delete $con->{tmr};
 		# and reduce worker count
-		$self->{workers}--;
+		$workers--;
 	}
 
 	# now remove this workeraction from the listenstring workeraction list
 
-	my $wmh = $self->{workermethods};
+	my $wmh = $workermethods; # laziness
 	my $l;
 	if (my $fv = $wm->filtervalue) {
 		$l = $wmh->{$method}->{$fv};
@@ -646,43 +631,43 @@ sub rpc_withdraw {
 }
 
 sub _ping {
-	my ($self, $con) = @_;
+	my ($con) = @_;
 	my $tmr;
-	Mojo::IOLoop->delay(sub {
+	$ioloop->delay(sub {
 		my $d = shift;
 		my $e = $d->begin;
-		$tmr = Mojo::IOLoop->timer(10 => sub { $e->(@_, 'timeout') } );
+		$tmr = $ioloop->timer(10 => sub { $e->(@_, 'timeout') } );
 		$con->call('rpcswitch.ping', {}, sub { $e->($con, @_) });
 	},
 	sub {
 		my ($d, $e, $r) = @_;
 		#print  'got ', Dumper(\@_);
 		if ($e and $e eq 'timeout') {
-			$self->log->info('uhoh, ping timeout for ' . $con->who);
-			Mojo::IOLoop->remove($con->id); # disconnect
+			$log->info('uhoh, ping timeout for ' . $con->who);
+			$ioloop->remove($con->id); # disconnect
 		} else {
+			$ioloop->remove($tmr);
 			if ($e) {
-				$self->log->debug("'got $e->{message} ($e->{code}) from $con->{who}");
+				$log->debug("'got $e->{message} ($e->{code}) from $con->{who}");
 				return;
 			}
-			$self->log->debug('got ' . $r . ' from ' . $con->who . ' : ping(' . $con->worker_id . ')');
-			Mojo::IOLoop->remove($tmr);
+			$log->debug('got ' . $r . ' from ' . $con->who . ' : ping(' . $con->worker_id . ')');
 		}
 	});
 }
 
 sub _shutdown {
-	my($self, $sig) = @_;
-	$self->log->info("caught sig$sig, shutting down");
+	my ($sig) = @_;
+	$log->info("caught sig$sig, shutting down");
 
-	# do cleanup here
+	# todo: cleanup
 
-	Mojo::IOLoop->stop;
+	$ioloop->stop;
 }
 
 # register internal rpcswitch.* methods
-sub register {
-	my ($self, $name, $cb, %opts) = @_;
+sub _register {
+	my ($name, $cb, %opts) = @_;
 	my %defaults = ( 
 		by_name => 1,
 		non_blocking => 0,
@@ -690,14 +675,13 @@ sub register {
 		raw => 0,
 		state => undef,
 	);
-	croak 'no self?' unless $self;
-	croak 'no callback?' unless ref $cb eq 'CODE';
+	croak 'no callback?' unless is_coderef($cb);
 	%opts = (%defaults, %opts);
 	croak 'a non_blocking notification is not sensible'
 		if $opts{non_blocking} and $opts{notification};
 	croak "internal methods need to start with rpcswitch." unless $name =~ /^rpcswitch\./;
-	croak "method $name already registered" if $self->{internal}->{$name};
-	$self->{internal}->{$name} = { 
+	croak "method $name already registered" if $internal->{$name};
+	$internal->{$name} = { 
 		name => $name,
 		cb => $cb,
 		by_name => $opts{by_name},
@@ -709,21 +693,22 @@ sub register {
 }
 
 sub _handle_internal_request {
-	my ($self, $c, $r) = @_;
-	my $m = $self->{internal}->{$r->{method}};
+	my ($c, $r) = @_;
+	my $m = $internal->{$r->{method}};
 	my $id = $r->{id};
-	return $self->_error($c, $id, ERR_METHOD, 'Method not found.') unless $m;
+	return _error($c, $id, ERR_METHOD, 'Method not found.') unless $m;
+	my $params = $r->{params};
 
-	#$self->log->debug('	m: ' . Dumper($m));
-	return $self->_error($c, $id, ERR_NOTNOT, 'Method is not a notification.') if !$id and !$m->{notification};
+	#$log->debug('	m: ' . Dumper($m));
+	return _error($c, $id, ERR_NOTNOT, 'Method is not a notification.') if !$id and !$m->{notification};
 
-	return $self->_error($c, $id, ERR_REQ, 'Invalid Request: params should be array or object.')
-		if ref $r->{params} ne 'ARRAY' and ref $r->{params} ne 'HASH';
+	return _error($c, $id, ERR_REQ, 'Invalid Request: params should be array or object.')
+		unless is_arrayref($params) or is_hashref($params);
 
-	return $self->_error($c, $id, ERR_PARAMS, 'This method expects '.($m->{by_name} ? 'named' : 'positional').' params.')
-		if ref $r->{params} ne ($m->{by_name} ? 'HASH' : 'ARRAY');
+	return _error($c, $id, ERR_PARAMS, 'This method expects '.($m->{by_name} ? 'named' : 'positional').' params.')
+		if ref $params ne ($m->{by_name} ? 'HASH' : 'ARRAY');
 	
-	return $self->_error($c, $id, ERR_BADSTATE, 'This method requires connection state ' . ($m->{state} // 'undef'))
+	return _error($c, $id, ERR_BADSTATE, 'This method requires connection state ' . ($m->{state} // 'undef'))
 		if $m->{state} and not ($c->state and $m->{state} eq $c->state);
 
 	if ($m->{raw}) {
@@ -733,7 +718,7 @@ sub _handle_internal_request {
 		local $@;
 		#my @ret = eval { $m->{cb}->($c, $jsonr, $r, $cb)};
 		my @ret = eval { $m->{cb}->($c, $r, $cb)};
-		return $self->_error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
+		return _error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
 		#say STDERR 'method returned: ', Dumper(\@ret);
 
 		$c->write(encode_json($ret[0])) if !$cb and $id;
@@ -741,75 +726,74 @@ sub _handle_internal_request {
 	}
 
 	my $cb;
-	$cb = sub { $self->_result($c, $id, \@_) if $id; } if $m->{non_blocking};
+	$cb = sub { _result($c, $id, \@_) if $id; } if $m->{non_blocking};
 
 	local $@;
-	my @ret = eval { $m->{cb}->($c, $r, $r->{params}, $cb)};
-	return $self->_error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
-	#$self->log->debug('method returned: '. Dumper(\@ret));
+	my @ret = eval { $m->{cb}->($c, $r, $params, $cb)};
+	return _error($c, $id, ERR_ERR, "Method threw error: $@") if $@;
+	#$log->debug('method returned: '. Dumper(\@ret));
 	
-	return $self->_result($c, $id, \@ret) if !$cb and $id;
+	return _result($c, $id, \@ret) if !$cb and $id;
 	return;
 }
 
 sub _handle_request {
-	my ($self, $c, $request) = @_;
-	my $debug = $self->{debug};
-	$self->log->debug('    in handle_request') if $debug;
+	my ($c, $request) = @_;
+	$log->debug('    in handle_request') if $debug;
 	my $method = $request->{method} or die 'huh?';
 	my $id = $request->{id};
 
-	my ($backend, $md);
-	unless ($md = $self->{methods}->{$method}) {
+	my $md;
+	unless ($md = $methods->{$method}) {
 		# try it as an internal method then
-		return $self->_handle_internal_request($c, $request);
+		return _handle_internal_request($c, $request);
 	}
-	$backend = $self->{methods}->{$method}->{b};
 
-	$self->log->debug("rpc_catchall for $method") if $debug;
+	$log->debug("rpc_catchall for $method") if $debug;
 
 	# auth only beyond this point
-	return $self->_error($c, $id, ERR_BADSTATE, 'This method requires an authenticated connection')
+	return _error($c, $id, ERR_BADSTATE, 'This method requires an authenticated connection')
 		unless $c->{state} and 'auth' eq $c->{state};
 
 	# check if $c->who is in the method2acl for this method?
 	my ($ns) = split /\./, $method, 2;
-	return $self->_error($c, $id, ERR_NONS, "no namespace in $method?")
+	return _error($c, $id, ERR_NONS, "no namespace in $method?")
 		unless $ns;
 
-	my $acl = $self->{method2acl}->{$method}
-		  // $self->{method2acl}->{"$ns.*"}
-		  // return $self->_error($c, $id, ERR_NOACL, "no method acl for $method");
+	my $acl = $method2acl->{$method}
+		  // $method2acl->{"$ns.*"}
+		  // return _error($c, $id, ERR_NOACL, "no method acl for $method");
 
 	my $who = $c->{who};
-	return $self->_error($c, $id, ERR_NOTAL, "acl $acl does not allow method $method for $who")
-		unless $self->_checkacl($acl, $who);
+	return _error($c, $id, ERR_NOTAL, "acl $acl does not allow method $method for $who")
+		unless _checkacl($acl, $who);
 
-	#print  'workermethods: ', Dumper($self->workermethods);
+	#print  'workermethods: ', Dumper($workermethods);
 
+	my $backend = $md->{b};
 	my $l; 
 
-	if (my $fk = $self->{backendfilter}->{$backend}
-			// $self->{backendfilter}->{"$ns.*"}) {
+	if (my $fk = $backendfilter->{$backend}
+			// $backendfilter->{"$ns.*"}) {
 
-		$self->log->debug("filtering for $backend with $fk") if $debug;
+		$log->debug("filtering for $backend with $fk") if $debug;
 		my $p = $request->{params};
-		return $self->_error($c, $id, ERR_BADPARAM, "Parameters should be a json object for filtering.")
-			unless ref $p eq 'HASH';
+		return _error($c, $id, ERR_BADPARAM, "Parameters should be a json object for filtering.")
+			unless is_hashref($p);
 
 		my $fv = $p->{$fk};
 
-		return $self->_error($c, $id, ERR_BADPARAM, "filter parameter $fk undefined.")
+		return _error($c, $id, ERR_BADPARAM, "filter parameter $fk undefined.")
 			unless defined($fv);
 
-		$l = $self->{workermethods}->{$backend}->{$fv};
+		$l = $workermethods->{$backend}->{$fv};
 
-		return $self->_error($c, $id, ERR_NOWORKER,
+		return _error($c, $id, ERR_NOWORKER,
 			"No worker available after filtering on $fk for backend $backend")
 				unless $l and @$l;
 	} else {
-		$l = $self->{workermethods}->{$backend};
-		return $self->_error($c, $id, ERR_NOWORKER, "No worker available for $backend.")
+		$l = $workermethods->{$backend};
+		return _error($c, $id, ERR_NOWORKER, "No worker available for $backend.")
 			unless $l and @$l;
 	}
 
@@ -825,10 +809,10 @@ sub _handle_request {
 	} else {
 		$wm = $$l[0];
 	}
-	return $self->_error($c, $id, ERR_INTERNAL, 'Internal error.') unless $wm;
+	return _error($c, $id, ERR_INTERNAL, 'Internal error.') unless $wm;
 
 	my $wcon = $wm->{connection};
-	$self->log->debug("forwarding $method to $wcon->{workername} ($wcon->{worker_id}) for $backend")
+	$log->debug("forwarding $method to $wcon->{workername} ($wcon->{worker_id}) for $backend")
 		if $debug;
 
 	# find or create channel
@@ -850,7 +834,7 @@ sub _handle_request {
 		$wcon->{refcount}++;
 		$channel->{reqs}->{$id} = 1;
 	}
-	$md->{'#'}++;
+	$md->{'#'}++; # per method call stats
 
 	# rewrite request to add rcpswitch information
 	my $workerrequest = encode_json({
@@ -867,9 +851,9 @@ sub _handle_request {
 
 	# forward request to worker
 	if ($debug) {
-		$self->log->debug("refcount connection $wcon $wcon->{refcount}");
-		$self->log->debug("refcount channel $channel " . scalar keys %{$channel->reqs});
-		$self->log->debug('    writing: ' . decode_utf8($workerrequest));
+		$log->debug("refcount connection $wcon $wcon->{refcount}");
+		$log->debug("refcount channel $channel " . scalar keys %{$channel->reqs});
+		$log->debug('    writing: ' . decode_utf8($workerrequest));
 	}
 
 	#$wcon->_write(encode_json($workerrequest));
@@ -878,9 +862,8 @@ sub _handle_request {
 }
 
 sub _handle_channel {
-	my ($self, $c, $jsonr, $r) = @_;
-	my $debug = $self->{debug};
-	$self->log->debug('    in handle_channel') if $debug;
+	my ($c, $jsonr, $r) = @_;
+	$log->debug('    in handle_channel') if $debug;
 	my $rpcswitch = $r->{rpcswitch};
 	my $id = $r->{id};
 	
@@ -888,13 +871,13 @@ sub _handle_channel {
 	unless ($rpcswitch->{vcookie}
 			 and $rpcswitch->{vcookie} eq 'eatme'
 			 and $rpcswitch->{vci}) {
-		return $self->_error($c, $id, ERR_BADCHAN, 'Invalid channel information') if $r->{method};
-		$self->log->info("invalid channel information from $c"); # better error message?
+		return _error($c, $id, ERR_BADCHAN, 'Invalid channel information') if $r->{method};
+		$log->info("invalid channel information from $c"); # better error message?
 		return;
 	}
 
 	#print 'rpcswitch: ', Dumper($rpcswitch);
-	#print 'channels; ', Dumper($self->channels);
+	#print 'channels; ', Dumper($channels);
 	my $chan = $c->{channels}->{$rpcswitch->{vci}};
 	my $con;
 	my $dir;
@@ -912,8 +895,8 @@ sub _handle_channel {
 		}
 	}		
 	unless ($chan) {
-		return $self->_error($c, $id, ERR_NOCHAN, 'No such channel.') if $r->{method};
-		$self->log->info("invalid channel from $c");
+		return _error($c, $id, ERR_NOCHAN, 'No such channel.') if $r->{method};
+		$log->info("invalid channel from $c");
 		return;
 	}		
 	if ($id) {
@@ -925,9 +908,9 @@ sub _handle_channel {
 		}
 	}
 	if ($debug) {
-		$self->log->debug("refcount connection $c $c->{refcount}");
-		$self->log->debug("refcount $chan " . scalar keys %{$chan->reqs});
-		$self->log->debug('    writing: ' . decode_utf8($$jsonr));
+		$log->debug("refcount connection $c $c->{refcount}");
+		$log->debug("refcount $chan " . scalar keys %{$chan->reqs});
+		$log->debug('    writing: ' . decode_utf8($$jsonr));
 	}
 	#print Dumper($chan->reqs);
 	# forward request
@@ -939,14 +922,14 @@ sub _handle_channel {
 
 
 sub _error {
-	my ($self, $c, $id, $code, $message, $data) = @_;
-	return $c->_error($id, $code, $message, $data);
+	my $c = shift;
+	return $c->_error(@_);
 }
 
 sub _result {
-	my ($self, $c, $id, $result) = @_;
+	my ($c, $id, $result) = @_;
 	$result = $$result[0] if scalar(@$result) == 1;
-	#$self->log->debug('_result: ' . Dumper($result));
+	#$log->debug('_result: ' . Dumper($result));
 	$c->_write(encode_json({
 		jsonrpc	    => '2.0',
 		id	    => $id,
@@ -956,16 +939,16 @@ sub _result {
 }
 
 sub _disconnect {
-	my ($self, $client) = @_;
-	$self->log->info('oh my.... ' . ($client->who // 'somebody')
+	my ($client) = @_;
+	$log->info('oh my.... ' . ($client->who // 'somebody')
 				. ' (' . $client->from . ') disonnected..');
 
 	return unless $client->who;
 
 	for my $m (keys %{$client->methods}) {
-		$self->log->debug("withdrawing $m");
+		$log->debug("withdrawing $m");
 		# hack.. fake a rpcswitch.withdraw request
-		$self->rpc_withdraw($client, {method => 'withdraw'}, {method => $m});
+		rpc_withdraw($client, {method => 'withdraw'}, {method => $m});
 	}
 
 	for my $c (values %{$client->channels}) {
@@ -989,10 +972,10 @@ sub _disconnect {
 		}
 		$con->notify('rpcswitch.channel_gone', {channel => $vci});
 		delete $con->channels->{$vci};
-		#delete $self->channels->{$vci};
+		#delete $channels->{$vci};
 		$c->delete();
 	}
-	delete $self->clients->{refaddr($client)};
+	delete $clients->{refaddr($client)};
 }
 
 

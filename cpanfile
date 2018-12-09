@@ -2,11 +2,15 @@
 # install with something like:
 # cpanm --installdeps .
 
+requires 'Clone::PP';
+
 requires 'JSON::MaybeXS', '1.003008';
 
 requires 'Mojolicious', '7.55';
 
 requires 'MojoX::NetstringStream', '0.05';
+
+requires 'Ref::Util';
 
 recommends 'Cpanel::JSON::XS', '2.3310';
 recommends 'IO::Socket::SSL', '1.94';

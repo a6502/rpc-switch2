@@ -1,6 +1,6 @@
 package RPC::Switch::Connection;
 use Mojo::Base 'Mojo::EventEmitter';
-use Mojo::IOLoop;
+#use Mojo::IOLoop;
 
 # standard perl
 use Carp;
@@ -12,6 +12,7 @@ use Scalar::Util qw(refaddr);
 # cpan
 use JSON::MaybeXS;
 use MojoX::NetstringStream 0.05;
+use Ref::Util qw(is_arrayref is_coderef is_hashref);
 
 # keep in sync with RPC::Switch
 use constant {
@@ -20,13 +21,12 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-has [qw(channels debug from log methods ns ping refcount reqauth server
-	state stream switch tmr who workername worker_id)];
+has [qw(channels from methods ns ping refcount reqauth server
+	state stream tmr who workername worker_id)];
 
 sub new {
 	my $self = shift->SUPER::new();
 	my ($server, $stream) = @_;
-	my $switch = $server->switch;
 	#say 'new connection!';
 	die 'no stream?' unless $stream and $stream->can('write');
 	my $handle = $stream->handle;
@@ -38,7 +38,7 @@ sub new {
 	$ns->on(chunk => sub {
 		my ($ns, $chunk) = @_;
 		# Process input chunk
-		$self->log->debug("    handle: " . decode_utf8($chunk)) if $self->{debug};
+		$RPC::Switch::log->debug("    handle: " . decode_utf8($chunk)) if $RPC::Switch::debug;
 		local $@;
 		my $r = eval { decode_json($chunk) };
 		my @err;
@@ -49,31 +49,28 @@ sub new {
 			@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
 				if $err[0];
 		}
-		$self->log->error(join(' ', grep defined, @err[1..$#err])) if @err;
+		$RPC::Switch::log->error(join(' ', grep defined, @err[1..$#err])) if @err;
 		$self->close if $err[0];
 		return;
 	});
 	$ns->on(close => sub { $self->_on_close(@_) });
 	$ns->on(nserr => sub {
 		my ($ns, $msg) = @_;
-		$self->log->error("$from ($self): $msg");
+		$RPC::Switch::log->error("$from ($self): $msg");
 		$self->_error(undef, ERR_TOOBIG, $msg);
 		$self->close;
 	});
 
 	$self->{channels} = {};
-	$self->{debug} = $switch->{debug};
 	$self->{from} = $from;
-	$self->{log} = $switch->log;
 	$self->{ns} = $ns;
 	$self->{ping} = 60; # fixme: configurable?
 	$self->{methods} = {};
 	$self->{refcount} = 0;
 	$self->{server} = $server;
 	$self->{stream} = $stream;
-	$self->{switch} = $switch;
 
-	$self->log->info('new connection on '. $server->localname . ' (' . $self .') from '. $from);
+	$RPC::Switch::log->info('new connection on '. $server->localname . ' (' . $self .') from '. $from);
 
 	# fixme: put this in a less hidden place?
 	$self->notify('rpcswitch.greetings', {who =>'rpcswitch', version => '1.0'});
@@ -87,7 +84,7 @@ sub call {
 	croak 'args should be a array or hash reference'
 		unless ref $args eq 'ARRAY' or ref $args eq 'HASH';
 	croak 'no callback?' unless $cb;
-	croak 'callback should be a code reference' if ref $cb ne 'CODE';
+	croak 'callback should be a code reference' unless is_coderef($cb);
 	my $id = md5_base64($self->{next_id}++ . $name . encode_json($args) . refaddr($cb));
 	croak 'duplicate call id' if $self->{calls}->{$id};
 	
@@ -97,10 +94,10 @@ sub call {
 		params => $args,
 		id  => $id,
 	};
-	$request->{vci} = $opts{vci} if $opts{vci};
+	#$request->{vci} = $opts{vci} if $opts{vci};
 	$request = encode_json($request);
 	$self->{calls}->{$id} = $cb; # more?
-	#$self->log->debug("    call: $request");
+	#$RPC::Switch::log->debug("    call: $request");
 	$self->_write($request);
 	return;
 }
@@ -109,13 +106,13 @@ sub notify {
 	my ($self, $name, $args, $cb) = @_;
 	croak 'no self?' unless $self;
 	croak 'args should be a array of hash reference'
-		unless ref $args eq 'ARRAY' or ref $args eq 'HASH';
+		unless is_arrayref($args) or is_hashref($args);
 	my $request = encode_json({
 		jsonrpc => '2.0',
 		method => $name,
 		params => $args,
 	});
-	#$self->log->debug("    notify: $request");
+	#$RPC::Switch::log->debug("    notify: $request");
 	$self->_write($request);
 	return;
 }
@@ -133,16 +130,16 @@ sub notify {
 
 sub _handle {
 	my ($self, $jsonr, $r) = @_;
-	return 'not a json object' if ref $r ne 'HASH';
+	return 'not a json object' unless is_hashref($r);
 	return 'expected jsonrpc version 2.0' unless defined $r->{jsonrpc} and $r->{jsonrpc} eq '2.0';
 	# id can be null
 	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
 	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
-	$self->{switch}->{chunks}++;
+	$RPC::Switch::chunks++;
 	if (defined $r->{rpcswitch}) {
-		return $self->{switch}->_handle_channel($self, $jsonr, $r);
+		return RPC::Switch::_handle_channel($self, $jsonr, $r);
 	} elsif (defined $r->{method}) {
-		return $self->{switch}->_handle_request($self, $r);
+		return RPC::Switch::_handle_request($self, $r);
 	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {
 		return $self->_handle_response($r);
 	} else {
@@ -152,19 +149,19 @@ sub _handle {
 
 sub _handle_response {
 	my ($self, $r) = @_;
-	#$self->log->debug('_handle_response: '. Dumper ($r));
+	#$RPC::Switch::log->debug('_handle_response: '. Dumper ($r));
 	my $id = $r->{id};
 	my $cb;
 	$cb = delete $self->{calls}->{$id} if $id;
 	if (defined $r->{error}) {
 		my $e = $r->{error};
-		return 'error is not an object' unless ref $e eq 'HASH';
+		return 'error is not an object' unless is_hashref($e);
 		return 'error code is not a integer' unless defined $e->{code} and $e->{code} =~ /^-?\d+$/;
         	return 'error message is not a string' if ref $e->{message};
         	return 'extra members in error object' if (keys %$e == 3 and !exists $e->{data}) or (keys %$e > 2);
-		$cb->($r->{error}) if $cb and ref $cb eq 'CODE';
+		$cb->($r->{error}) if $cb and is_coderef($cb);
 	} else {
-		return undef, "response for unknown call $id" unless $cb and ref $cb eq 'CODE';
+		return undef, "response for unknown call $id" unless $cb and is_coderef($cb);
 		$cb->(0, $r->{result});
 	}
 	return;
@@ -193,14 +190,14 @@ sub _error {
 
 sub _write {
 	my $self = shift;
-	$self->log->debug('    writing: ' . decode_utf8(join('', @_)))
-		if $self->{debug};
+	$RPC::Switch::log->debug('    writing: ' . decode_utf8(join('', @_)))
+		if $RPC::Switch::debug;
 	$self->{ns}->write(@_);
 }
 
 sub _on_close {
 	my ($self, $ns) = @_;
-	Mojo::IOLoop->remove($self->{tmr}) if $self->{tmr};
+	RPC::Switch::ioloop->remove($self->{tmr}) if $self->{tmr};
 	$self->emit(close => $self);
 	%$self = ();
 }
