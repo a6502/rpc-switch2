@@ -1,36 +1,35 @@
 package RPC::Switch::Auth;
-use Mojo::Base 'Mojo::EventEmitter';
+use Mojo::Base -strict;
 
 use Module::Load;
+use Scalar::Util qw(blessed);
 
-has [qw(methods)];
+our %methods;
 
-sub new {
-	my $self = shift->SUPER::new();
-
+sub init {
 	my ($cfgdir, $cfg, $section) = @_;
 
-	my $methods = $cfg->{$section};
+	my $ms = $cfg->{$section};
+	keys %$ms;
 	
-	for my $m (keys %$methods) {
-		my $mod = $methods->{$m};
+	while (my ($m, $mod) = each %$ms) {
 		load $mod;
 		my $a = $mod->new($cfgdir, $cfg->{"$section|$m"});
-		die "could not create authentication module object '$mod'" unless $a;
-		$methods->{$m} = $a;
+		die "could not create authentication adapter '$mod'"
+			unless blessed($a) and $a->can('authenticate');
+		$methods{$m} = $a;
 	}
 
-	$self->{methods} = $methods;
-	return $self;
+	return 1;
 }
 
 
 sub authenticate {
-	my ($self, $method, $con, $who, $token, $cb) = @_;
+	my ($method, $con, $who, $token, $cb) = @_;
 
 	$cb->(0, 'undef argument(s)') unless $who and $method and $token;
 	
-	my $adapter = $con->server->authmethods->{$method};
+	my $adapter = $methods{$method};
 	unless ($adapter) {
 		$cb->(0, "no such authentication method '$method' for server '$con->{server}->{localname}'");
 		return;

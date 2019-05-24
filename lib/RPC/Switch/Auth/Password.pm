@@ -1,4 +1,4 @@
-package RPC::Switch::Auth::Passwd;
+package RPC::Switch::Auth::Password;
 use Mojo::Base 'RPC::Switch::Auth::Base';
 
 use Data::Dumper;

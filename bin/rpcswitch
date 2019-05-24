@@ -4,7 +4,6 @@ use Mojo::Base -strict;
 
 # standard perl
 use Cwd qw(realpath);
-use Data::Dumper;
 use FindBin;
 use Getopt::Long;
 
@@ -17,22 +16,17 @@ exit main();
 sub main {
 	my $cfgdir = realpath("$FindBin::Bin/../etc/");
 	my $cfgfile = 'config.pl';
-	my $daemonize = 0;
 	my $debug = 0;
 
 	GetOptions(
 		'cfgdir=s' => \$cfgdir,
 		'cfgfile=s' => \$cfgfile,
-		'daemon!' => \$daemonize,
 		'debug' => \$debug,
 	) or die "Error in command line arguments\n";
 
-	RPC::Switch::init(
+	return RPC::Switch::switch(
 		cfgdir => $cfgdir,
 		cfgfile => $cfgfile,
-		daemon => $daemonize,
 		debug => $debug,
-	) or die 'no RPC Switch?';
-
-	return RPC::Switch::work();
+	);
 }

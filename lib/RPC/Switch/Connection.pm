@@ -21,8 +21,18 @@ use constant {
 	ERR_PARSE    => -32700, # Invalid JSON was received by the server.
 };
 
-has [qw(channels from methods ns ping refcount reqauth server
+has [qw(channels cid from is_mq methods ncid ns ping refcount reqauth reqq server
 	state stream tmr who workername worker_id)];
+
+#our $connection_id_counter = 1;
+# (shared) globals
+our (
+	$chunks,
+	$concount,
+	$debug,
+	$ioloop,
+	$log,
+);
 
 sub new {
 	my $self = shift->SUPER::new();
@@ -31,6 +41,10 @@ sub new {
 	die 'no stream?' unless $stream and $stream->can('write');
 	my $handle = $stream->handle;
 	my $from = $handle->peerhost .':'. $handle->peerport;
+	$concount++;
+	my $ncid = $self->{ncid} = $concount; # $connection_id_counter; # numerical connection id
+	my $cid = $self->{cid} = "$ncid\@$$";
+	#$connection_id_counter++;
 	my $ns = MojoX::NetstringStream->new(
 		stream => $stream,
 		maxsize => 999999, # fixme: configurable?
@@ -38,31 +52,36 @@ sub new {
 	$ns->on(chunk => sub {
 		my ($ns, $chunk) = @_;
 		# Process input chunk
-		$RPC::Switch::log->debug("    handle: " . decode_utf8($chunk)) if $RPC::Switch::debug;
+		$log->debug("    handle: " . decode_utf8($chunk)) if $debug;
+		# todo: try catch?
 		local $@;
 		my $r = eval { decode_json($chunk) };
 		my @err;
 		if ($@) {
-			@err = $self->_error(undef, ERR_PARSE, "json decode failed: $@");
-		} else {
-			@err = $self->_handle(\$chunk, $r);
-			@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
-				if $err[0];
+			@err = $self->_error(undef, ERR_PARSE, "JSON decode failed: $@");
+			$log->error(join(' ', grep defined, @err[1..$#err])) if @err;
+			$self->close if $err[0];
+			return;
 		}
-		$RPC::Switch::log->error(join(' ', grep defined, @err[1..$#err])) if @err;
+		@err = $self->_handle(\$chunk, $r);
+		return unless @err;
+		@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
+			if $err[0];
+		$log->error(join(' ', grep defined, @err[1..$#err])) if @err;
 		$self->close if $err[0];
 		return;
 	});
 	$ns->on(close => sub { $self->_on_close(@_) });
 	$ns->on(nserr => sub {
 		my ($ns, $msg) = @_;
-		$RPC::Switch::log->error("$from ($self): $msg");
+		$log->error("$from ($self): $msg");
 		$self->_error(undef, ERR_TOOBIG, $msg);
 		$self->close;
 	});
 
 	$self->{channels} = {};
 	$self->{from} = $from;
+	$self->{is_mq} = 0;
 	$self->{ns} = $ns;
 	$self->{ping} = 60; # fixme: configurable?
 	$self->{methods} = {};
@@ -70,12 +89,36 @@ sub new {
 	$self->{server} = $server;
 	$self->{stream} = $stream;
 
-	$RPC::Switch::log->info('new connection on '. $server->localname . ' (' . $self .') from '. $from);
+	$log->info("new connection on $server->{localname} ($cid / $self) from  $from");
 
 	# fixme: put this in a less hidden place?
 	$self->notify('rpcswitch.greetings', {who =>'rpcswitch', version => '1.0'});
 
 	return $self;
+}
+
+sub _handle {
+	my ($self, $jsonr, $r) = @_;
+	return 'not a json object' unless is_hashref($r);
+	return 'expected jsonrpc version 2.0' unless defined $r->{jsonrpc} and $r->{jsonrpc} eq '2.0';
+	# id can be null
+	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
+	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
+	$chunks++;
+	if (defined $r->{rpcswitch}{vci}) {
+		#return RPC::Switch::Processor::_handle_channel($self, $jsonr, $r);
+		goto &RPC::Switch::Processor::_handle_channel;
+	} elsif (defined $r->{method}) {
+		#return RPC::Switch::Processor::_handle_request($self, $r);
+		@_ = ($self, $r);
+		goto &RPC::Switch::Processor::_handle_request;
+	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {
+		#return $self->_handle_response($r);
+		@_ = ($self, $r);
+		goto &_handle_response;
+	} else {
+		return 'invalid jsonnrpc object';
+	}
 }
 
 sub call {
@@ -97,7 +140,7 @@ sub call {
 	#$request->{vci} = $opts{vci} if $opts{vci};
 	$request = encode_json($request);
 	$self->{calls}->{$id} = $cb; # more?
-	#$RPC::Switch::log->debug("    call: $request");
+	#$log->debug("    call: $request");
 	$self->_write($request);
 	return;
 }
@@ -112,44 +155,14 @@ sub notify {
 		method => $name,
 		params => $args,
 	});
-	#$RPC::Switch::log->debug("    notify: $request");
+	#$log->debug("    notify: $request");
 	$self->_write($request);
 	return;
 }
 
-#sub handle {
-#	my ($self, $json) = @_;
-#	$self->log->debug("    handle: $json") if $self->{debug};
-#	local $@;
-#	my $r = eval { decode_json($json) };
-#	return $self->_error(undef, ERR_PARSE, "json decode failed: $@") if $@;
-#	my @err = $self->_handle($r);
-#	return $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0]) if $err[0];
-#        return @err;
-#}
-
-sub _handle {
-	my ($self, $jsonr, $r) = @_;
-	return 'not a json object' unless is_hashref($r);
-	return 'expected jsonrpc version 2.0' unless defined $r->{jsonrpc} and $r->{jsonrpc} eq '2.0';
-	# id can be null
-	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
-	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
-	$RPC::Switch::chunks++;
-	if (defined $r->{rpcswitch}) {
-		return RPC::Switch::_handle_channel($self, $jsonr, $r);
-	} elsif (defined $r->{method}) {
-		return RPC::Switch::_handle_request($self, $r);
-	} elsif (exists $r->{id} and (exists $r->{result} or defined $r->{error})) {
-		return $self->_handle_response($r);
-	} else {
-		return 'invalid jsonnrpc object';
-	}
-}
-
 sub _handle_response {
 	my ($self, $r) = @_;
-	#$RPC::Switch::log->debug('_handle_response: '. Dumper ($r));
+	#$log->debug('_handle_response: '. Dumper ($r));
 	my $id = $r->{id};
 	my $cb;
 	$cb = delete $self->{calls}->{$id} if $id;
@@ -190,14 +203,14 @@ sub _error {
 
 sub _write {
 	my $self = shift;
-	$RPC::Switch::log->debug('    writing: ' . decode_utf8(join('', @_)))
-		if $RPC::Switch::debug;
+	$log->debug("    writing [$self->{cid}]: " . decode_utf8(join('', @_)))
+		if $debug;
 	$self->{ns}->write(@_);
 }
 
 sub _on_close {
 	my ($self, $ns) = @_;
-	RPC::Switch::ioloop->remove($self->{tmr}) if $self->{tmr};
+	$ioloop->remove($self->{tmr}) if $self->{tmr};
 	$self->emit(close => $self);
 	%$self = ();
 }
@@ -213,3 +226,5 @@ sub close {
 #}
 
 1;
+
+__END__

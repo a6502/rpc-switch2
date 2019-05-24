@@ -1,7 +1,7 @@
 package RPC::Switch::Channel;
-use Mojo::Base 'Mojo::EventEmitter';
+use Mojo::Base -base;
 
-has [qw(client reqs vci worker)];
+has [qw(ccid client reqs vci wcid worker)];
 
 sub delete {
 	my $self = shift;
