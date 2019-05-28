@@ -753,7 +753,8 @@ sub _handle_request {
 		my ($r, $e) = RPC::Switch::ReqAuth::authenticate_request($ras, $reqauth, sub {
 			my ($r, $e) = @_;
 
-			if ($e) {
+			unless ($r) {
+				$e //= '';
 				$e = "request authentication failed for method $method: $e";
 				$log->error($e);
 				return _error($con, $id, ERR_REQAUTH_FAILED, $e);
@@ -764,12 +765,13 @@ sub _handle_request {
 			_do_dispatch($con, $request, $md);
 		});
 
-		if ($e) {
+		return unless defined $r; # the callback will resume processing..
+		unless ($r) {
+			$e //= '';
 			$e = "request authentication failed for method $method: $e";
 			$log->error($e);
 			return _error($con, $id, ERR_REQAUTH_FAILED, $e);
 		}
-		return unless $r; # the callback will resume processing..
 		$request->{rpcswitch}->{reqauth} = $r;
 	} else {
 		delete $request->{rpcswitch}->{reqauth}; # do not leak information
