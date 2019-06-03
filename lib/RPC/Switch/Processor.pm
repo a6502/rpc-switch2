@@ -200,7 +200,7 @@ sub rpc_get_method_details {
 	die "acl $acl does not allow calling of $method by $who"
 		unless _checkacl($acl, $who);
 
-	$md = clone($md); # copy to clobber
+	$md = { %$md }; # shallow copy to clobber
 
 	# now find a backend
 	my $backend = $md->{b};
@@ -461,13 +461,20 @@ sub rpc_withdraw {
 	my ($con, $m, $i) = @_;
 	my $method = $i->{method} or die 'method required';
 	#my $con = sel('cons', $cid);
-	my $who = $con->{who};
-	$log->info("withdraw of $method from $who ($con->{from})");
+	#my $who = $con->{who};
+	#$log->info("withdraw of $method from $who ($con->{from})");
+
+	my $cid = $con->cid;
+
+	$log->info("withdraw of $method by " . ($cid // 'unknown') 
+				. ' (' . ($con->{who} // 'somebody')
+				. ' ) from ' . ($con->{from} // 'somewhere') . ') disonnected..');
 
 	# first try to update the connection workermethod list
 	my $wms = $con->{workermethods};
-	die 'nothing announced'  unless is_arrayref($wms);
+	die 'nothing announced?'  unless is_arrayref($wms);
 	
+	# todo: filtering?
 	my @m = grep($_ == $method, 0..$#$wms);
 	die "method $method was not announced" unless @m;
 	splice @$wms, $_, 1 for @m;
@@ -476,18 +483,15 @@ sub rpc_withdraw {
 	unless (@$wms) {
 		# cleanup ping timer if connection/client has no more methods
 		$log->debug("remove tmr $con->{tmr}");
-		_send_response({ cid => $con->{cid}, ping => 0 });
-		$RPC::Switch::workers--;
+		$ioloop->remove($con->{tmr});
 	}
 	
-	# now remove this worker from the wm table
 	# we need the json value here because we need the exact string value to delete
-	$wms = allforkey('wm', $method, 'json');
-	for my $wm (@$wms) {
-		my $w = decode_json($wm);
-		next unless $w->{connection} eq $con->cid;
-		del('wm', $method, $wm);
-	}
+	my $foo = allforkey('wm', $method, 'json');
+	next unless $foo;
+	#print "wm $wm: ", Dumper($foo);
+	my @foo = grep { my $bar = decode_json($_); $bar->{cid} eq $cid } @$foo;
+	del('wm', $method, $foo[0]) if @foo;
 
 	return 1;
 }
