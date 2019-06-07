@@ -23,7 +23,7 @@ sub new {
 		$serveropts->{tls_cert} = $l->{tls_cert};
 	}
 	if ($l->{tls_ca}) {
-		#$serveropts->{tls_verify} = 0; # cheating..
+		$serveropts->{tls_verify} = 0x03;
 		$serveropts->{tls_ca} = $l->{tls_ca};
 	}
 
