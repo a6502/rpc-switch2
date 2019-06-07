@@ -268,7 +268,7 @@ sub rpc_get_stats {
 		open(my $fh, "$tmpdir/st/$c.json") or next;
 		my $s = decode_json(<$fh>);
 		close($fh);
-		for (qw(chunks clients concount)) {
+		for (qw(chunks clients connections workers)) {
 			$stats{$_} += $s->{$_};
 		}
 		my $m = $s->{methods} // next;
@@ -1181,9 +1181,10 @@ sub _write_stats {
 
 	my %stats = (
 		chunks => $chunks,
-		concount => $concount,
+		connections => $concount,
 		clients => scalar keys %cons,
 		methods => \%mstat,
+		workers => scalar grep { is_hashref($_) and $_->{workermethods} } values %cons,
 	);
 
 	open(my $fh, '>', "$nfn")
