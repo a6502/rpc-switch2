@@ -14,7 +14,7 @@ requires 'MojoX::LineStream';
 
 requires 'MojoX::NetstringStream', '0.05';
 
-requires 'POSIX::RT::MQ', 0.04;
+requires 'POSIX::RT::MQ', '0.04';
 
 requires 'Ref::Util';
 
