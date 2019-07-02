@@ -630,6 +630,10 @@ sub _forward_channel {
 	my $channel;
 	# fixme: for return msgs channel should exist?
 	unless ($channel = $tocon->{channels}->{$vci}) {
+		if ($dir < 0) {
+			$log->info("_forward_channel: channel $vci not found for dir < 0");
+			return;
+		}
 		$channel = RPC::Switch::Channel->new(
 			ccid => $fromcid,
 			client => $fromcon, #$cid,
@@ -750,7 +754,8 @@ sub _handle_request {
 	$txn->commit(); #meh
 	
 	if (my $ras = $md->{r}) {
-		my $reqauth = $request->{rpcswitch}->{reqauth};
+		my $reqauth;
+		$reqauth = $request->{rpcswitch}->{reqauth} if is_hashref($request->{rpcswitch});
 		return _error($con, $id, ERR_REQAUTH_REQUIRED,
 			"request authentication required for method $method but not present")
 				unless is_hashref($reqauth);
@@ -778,7 +783,8 @@ sub _handle_request {
 		}
 		$request->{rpcswitch}->{reqauth} = $r;
 	} else {
-		delete $request->{rpcswitch}->{reqauth}; # do not leak information
+		delete $request->{rpcswitch}->{reqauth}
+			if is_hashref($request->{rpcswitch}); # do not leak information
 	}
 
 	# we expect request_authentication to be very common.  Inlining
@@ -908,6 +914,7 @@ sub _do_dispatch {
 	#print 'rpcswitch info: ', Dumper($rpcswitch);
 	unless ($rpcswitch and $rpcswitch->{vcookie} and $rpcswitch->{vcookie} eq 'eatme' and not defined $rpcswitch->{vci}) {
 		# fixme: throw an error on invalid rpcswitch information?
+		# difficult because we might get here asynch.
 		$rpcswitch = { vcookie => 'eatme' };
 	}
 	$rpcswitch->{vci} = $vci;
@@ -953,66 +960,63 @@ sub _handle_channel {
 	$log->debug('    in handle_channel') if $debug;
 	my $rpcswitch = $r->{rpcswitch};
 	my $id = $r->{id};
-	
+	my $vci;
+
 	# fixme: error on a response?
 	unless ($rpcswitch->{vcookie}
 			 and $rpcswitch->{vcookie} eq 'eatme'
-			 and $rpcswitch->{vci}) {
+			 and $vci = $rpcswitch->{vci}) {
 		$log->info("invalid channel information from $con"); # better error message?
-		return _error($con, $id, ERR_BADCHAN, 'Invalid channel information') if $r->{method};
 		return;
 	}
 
 	#print 'rpcswitch: ', Dumper($rpcswitch);
 	#print 'channels; ', Dumper($channels);
-	my $vci = $rpcswitch->{vci};
 	my $chan = $con->{channels}->{$vci};
-	unless ($chan->{vci}) {
-		$log->info("invalid channel $vci from $con)");
-		$log->info("chan : " . Dumper($chan));
-		return _error($con, $id, ERR_NOCHAN, 'No such channel.') if $r->{method};
+	unless (is_hashref($chan)) {
+		$log->info("no such channel $vci from $con)");
+		#$log->info("chan : " . Dumper($chan));
 		return;
 	}
 	#my $chan = $sql->db->query('select val from channels where vci = ?', $vci)->array;
 	#my $chan = sel('channels', $vci);
 	my $cid = $con->{cid};
 	my ($dir, $tocid, $tocon);
-	if ($chan) {
-		#$log->debug("con $con chan: ", Dumper($chan));
-		if ($cid eq $chan->{wcid}) {
-			# worker to client
-			$tocid = $chan->{ccid};
-			$tocon = $chan->{client};
-			$dir = -1;
-		} elsif ($cid eq $chan->{ccid}) {
-			# client to worker
-			$tocon = $chan->{worker};
-			$tocid = $chan->{wcid};
-			$dir = 1;
-		} else {
-			$chan = undef;
-		}
-	}		
-	unless ($chan) {
-		$log->info("invalid channel from $con");
-		return _error($con, $id, ERR_NOCHAN, 'No such channel.') if $r->{method};
+	#$log->debug("con $con chan: ", Dumper($chan));
+	if ($cid eq $chan->{wcid}) {
+		# worker to client
+		$tocid = $chan->{ccid};
+		$tocon = $chan->{client};
+		$dir = -1;
+	#} elsif ($cid eq $chan->{ccid}) {
+	#	# client to worker
+	#	$tocon = $chan->{worker};
+	#	$tocid = $chan->{wcid};
+	#	$dir = 1;
+	} else {
+	#	$chan = undef;
+	#}
+	#unless ($chan) {
+		$log->info("channel information from $con for a client"); # better error message?
+		return _error($con, $id, ERR_BADCHAN, 'Channel information is not allowed from clients');
 		return;
 	}		
 
 	#my $refmod;
 	# fixme: look at dir?
-	if ($id) {
-		if ($r->{method}) {
-			$chan->{reqs}->{$id} = $dir;
-			#$refmod = 1;
-		} else {
-			#$con->{refcount}--;
-			#$refmod = -1;
-			delete $chan->{reqs}->{$id};
-			#del('reqs', $vci, $id);
-			#$sql->db->query('delete from reqs where vci = ? and id = ?', $vci, $id);
-		}
-	}
+	#if ($id) {
+	#	if ($r->{method}) {
+	#		$chan->{reqs}->{$id} = $dir;
+	#		#$refmod = 1;
+	#	} else {
+	#		#$con->{refcount}--;
+	#		#$refmod = -1;
+	#		delete $chan->{reqs}->{$id};
+	#		#del('reqs', $vci, $id);
+	#		#$sql->db->query('delete from reqs where vci = ? and id = ?', $vci, $id);
+	#	}
+	#}
+	delete $chan->{reqs}->{$id} if $id;
 	if ($debug) {
 		#$log->debug("refcount connection $con $con->{refcount}");
 		$log->debug("refcount $chan " . scalar keys %{$chan->{reqs}});
@@ -1144,11 +1148,13 @@ sub _disconnect {
 				} # else ?
 			}
 			$tocon->notify('rpcswitch.channel_gone', {channel => $vci});
-			delete $tocon->channels->{vci};
 		}
+		delete $tocon->channels->{$vci};
+		$log->debug("_disconnect: delete channel $c");
 		$c->delete();
 	}
 
+	$log->debug("_disconnect done for $con?");
 	return;
 }
 
@@ -1170,6 +1176,7 @@ sub _channel_gone {
 		} # else ?
 	}
 	$tocon->notify('rpcswitch.channel_gone', {channel => $vci});
+	$log->debug("_channel_gone: delete channel $c");
 	$c->delete();
 
 	return;

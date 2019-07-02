@@ -105,7 +105,7 @@ sub _handle {
 	#return 'id is not a string or number' if exists $r->{id} and (not defined $r->{id} or ref $r->{id});
 	return 'id is not a string or number' if exists $r->{id} and ref $r->{id};
 	$chunks++;
-	if (defined $r->{rpcswitch}{vci}) {
+	if (is_hashref($r->{rpcswitch}) and $r->{rpcswitch}{vci}) {
 		#return RPC::Switch::Processor::_handle_channel($self, $jsonr, $r);
 		goto &RPC::Switch::Processor::_handle_channel;
 	} elsif (defined $r->{method}) {
