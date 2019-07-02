@@ -756,32 +756,35 @@ sub _handle_request {
 	if (my $ras = $md->{r}) {
 		my $reqauth;
 		$reqauth = $request->{rpcswitch}->{reqauth} if is_hashref($request->{rpcswitch});
-		return _error($con, $id, ERR_REQAUTH_REQUIRED,
-			"request authentication required for method $method but not present")
-				unless is_hashref($reqauth);
-		my ($r, $e) = RPC::Switch::ReqAuth::authenticate_request($ras, $reqauth, sub {
-			my ($r, $e) = @_;
+		if (is_hashref($reqauth)) {
+			my ($r, $e) = RPC::Switch::ReqAuth::authenticate_request($ras, $reqauth, sub {
+				my ($r, $e) = @_;
 
+				unless ($r) {
+					$e //= '';
+					$e = "request authentication failed for method $method: $e";
+					$log->error($e);
+					return _error($con, $id, ERR_REQAUTH_FAILED, $e);
+				}
+
+				$request->{rpcswitch}->{reqauth} = $r;
+
+				_do_dispatch($con, $request, $md);
+			});
+
+			return unless defined $r; # the callback will resume processing..
 			unless ($r) {
 				$e //= '';
 				$e = "request authentication failed for method $method: $e";
 				$log->error($e);
 				return _error($con, $id, ERR_REQAUTH_FAILED, $e);
 			}
-					
 			$request->{rpcswitch}->{reqauth} = $r;
-
-			_do_dispatch($con, $request, $md);
-		});
-
-		return unless defined $r; # the callback will resume processing..
-		unless ($r) {
-			$e //= '';
-			$e = "request authentication failed for method $method: $e";
-			$log->error($e);
-			return _error($con, $id, ERR_REQAUTH_FAILED, $e);
+		} else {
+			return _error($con, $id, ERR_REQAUTH_REQUIRED,
+				"request authentication required for method $method but not present")
+					unless $md->{o};
 		}
-		$request->{rpcswitch}->{reqauth} = $r;
 	} else {
 		delete $request->{rpcswitch}->{reqauth}
 			if is_hashref($request->{rpcswitch}); # do not leak information
