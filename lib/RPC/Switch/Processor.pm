@@ -513,7 +513,7 @@ sub _ping {
 		#print  '_ping got ', Dumper(\@_);
 		if ($e and $e eq 'timeout') {
 			$log->info('uhoh, ping timeout for ' . $con->{who});
-			$ioloop->remove($con->id); # disconnect
+			#$ioloop->remove($con->id); # disconnect
 			$con->close();
 		} else {
 			$ioloop->remove($tmr);
@@ -651,11 +651,17 @@ sub _forward_channel {
 	#$tocon->{refcount} += $refmod;
 	if ($id and $dir < 0) {
 		delete $channel->{reqs}->{$id};
+		#if (delete $channel->{reqs}->{$id}) {
+		#	say "_forward_channel: deleted $id";
+		#} else {
+		#	say "_forward_channel: failed to delete $id";
+		#}
 		$log->debug("refcount channel $channel " . scalar keys %{$channel->{reqs}}) if $debug;
 		#$sql->db->query("insert into reqs values (?,?)", $vci, $id);
 		#ins('reqs', $vci, $id);
 	}
 
+	$log->debug('    writing: ' . decode_utf8($json)) if $debug;
 	$tocon->{ns}->write($json);
 	return;
 }
@@ -932,11 +938,7 @@ sub _do_dispatch {
 	});
 
 	# forward request to worker
-	if ($debug) {
-		#$log->debug("refcount connection $wcon $wcon->{refcount}");
-		$log->debug("refcount channel $channel " . scalar keys %{$channel->{reqs}});
-		$log->debug('    writing: ' . decode_utf8($workerrequest));
-	}
+	$log->debug("refcount channel $channel " . scalar keys %{$channel->{reqs}}) if $debug;
 
 	#$wcon->_write(encode_json($workerrequest));
 	if ($wcon->{is_mq}) {
@@ -951,6 +953,7 @@ sub _do_dispatch {
 			chunk => $workerrequest,
 		});
 	} else {
+		$log->debug('    writing: ' . decode_utf8($workerrequest)) if $debug;
 		$wcon->{ns}->write($workerrequest);
 	}
 	#_send_response({ cid => $wcid, bla => 'bla', chunk => $workerrequest });
@@ -1019,7 +1022,15 @@ sub _handle_channel {
 	#		#$sql->db->query('delete from reqs where vci = ? and id = ?', $vci, $id);
 	#	}
 	#}
-	delete $chan->{reqs}->{$id} if $id;
+	#delete $chan->{reqs}->{$id} if $id;
+	if ($id) {
+		delete $chan->{reqs}->{$id};
+		#if (delete $chan->{reqs}->{$id}) {
+		#	say "_handle_channel: deleted $id";
+		#} else {
+		#	say "_handle_channel: failed to delete $id";
+		#}
+	}
 	if ($debug) {
 		#$log->debug("refcount connection $con $con->{refcount}");
 		$log->debug("refcount $chan " . scalar keys %{$chan->{reqs}});
@@ -1145,14 +1156,16 @@ sub _disconnect {
 				dir => $dir,
 			});
 		} else {
-			for my $id (keys %$reqs) {
-				if ($reqs->{$id} == $dir) {
+			if ($dir == -1) {
+				for my $id (keys %$reqs) {
+					#say "looking at $id: ", $reqs->{$id};
 					$tocon->_error($id, ERR_GONE, 'opposite end of channel gone');
-				} # else ?
+				}
 			}
 			$tocon->notify('rpcswitch.channel_gone', {channel => $vci});
 		}
 		delete $tocon->channels->{$vci};
+		#print 'tocon: ', Dumper($tocon);
 		$log->debug("_disconnect: delete channel $c");
 		$c->delete();
 	}
@@ -1173,10 +1186,11 @@ sub _channel_gone {
 	$log->info("forwarding channel_gone to $tocid ($tocon) for channel $vci ($c) dir $dir");
 	my $reqs = $c->reqs;
 
-	for my $id (keys %$reqs) {
-		if ($reqs->{$id} == $dir) {
+	if ($dir == -1) {
+		for my $id (keys %$reqs) {
+			#say "looking at $id: ", $reqs->{$id};
 			$tocon->_error($id, ERR_GONE, 'opposite end of channel gone');
-		} # else ?
+		}
 	}
 	$tocon->notify('rpcswitch.channel_gone', {channel => $vci});
 	$log->debug("_channel_gone: delete channel $c");
