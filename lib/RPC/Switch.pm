@@ -356,7 +356,7 @@ sub _start_processors {
 	$rdrlines->on(line => sub {
 		my ($ls, $line) = @_;
 		my ($child, $pid, $msg) = split ' ', $line, 3;
-		$log->info("got line from $child [$pid]: $msg");
+		$log->debug("got line from $child [$pid]: $msg");
 		$heartbeat[$child] = time();
 	});
 	$rdrlines->on(close => sub {
