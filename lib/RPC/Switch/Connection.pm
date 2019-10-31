@@ -59,16 +59,19 @@ sub new {
 		my @err;
 		if ($@) {
 			@err = $self->_error(undef, ERR_PARSE, "JSON decode failed: $@");
-			$log->error(join(' ', grep defined, @err[1..$#err])) if @err;
-			$self->close if $err[0];
+			$log->error(join(' ', grep defined, @err[1..$#err]));
+			$self->close;
 			return;
 		}
 		@err = $self->_handle(\$chunk, $r);
 		return unless @err;
-		@err = $self->_error(undef, ERR_REQ, 'Invalid Request: ' . $err[0])
-			if $err[0];
+		@err = $self->_error(undef, ERR_REQ, ('Invalid Request: ' . join(' ', grep defined, @err)) )
+			unless ref $err[0];
 		$log->error(join(' ', grep defined, @err[1..$#err])) if @err;
-		$self->close if $err[0];
+		if (ref $err[0] and ${$err[0]}) {
+			$log->error("Closing connection $cid because of errors");
+			$self->close; # if $err[0];
+		}
 		return;
 	});
 	$ns->on(close => sub { $self->_on_close(@_) });
@@ -196,9 +199,9 @@ sub _error {
 			},
 		}));
 	};
-	return 1, $err if $@;
-	return 1, $err if $code == ERR_PARSE or $code == ERR_REQ;
-	return 0, $err;
+	return \1, $err if $@;
+	return \1, $err if $code == ERR_PARSE or $code == ERR_REQ;
+	return \0, $err;
 }
 
 sub _write {
