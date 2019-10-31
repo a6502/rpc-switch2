@@ -19,6 +19,7 @@ sub new {
 	$serveropts->{address} = $l->{address} if $l->{address};
 	if ($l->{tls_key}) {
 		$serveropts->{tls} = 1;
+		$serveropts->{tls_verify} = 0x00;
 		$serveropts->{tls_key} = $l->{tls_key};
 		$serveropts->{tls_cert} = $l->{tls_cert};
 	}
