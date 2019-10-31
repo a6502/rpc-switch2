@@ -380,9 +380,10 @@ sub rpc_announce {
 		  // sel('backend2acl', "$ns.*")
 		  // die "no backend acl for $method\n";
 
-	die "acl $acl does not allow announce of $method by $who\n"
-		unless _checkacl($acl, $who);
-
+	unless (_checkacl($acl, $who)) {
+		$acl = '[' . join(',', @$acl) . ']' if is_arrayref($acl);
+		die "acl $acl does not allow announce of $method by $who\n"
+	}
 	# now check for filtering
 
 	my $filterkey = sel('backendfilter', $method)
