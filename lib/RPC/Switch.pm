@@ -28,7 +28,7 @@ use File::Basename;
 use File::Path qw(remove_tree);
 use File::Temp qw(tempfile);
 use FindBin qw($RealBin $RealScript);
-use List::Util qw(shuffle);
+use List::Util qw(any shuffle);
 use POSIX qw(:sys_wait_h);
 use Scalar::Util qw(refaddr);
 use Time::HiRes qw(sleep);
@@ -232,7 +232,12 @@ sub switch {
 	$log->info("RPC::Switch master [$$] starting cleanup");
 
 	kill 'TERM', map { $log->info("killing $_"); $_ } grep defined, @children;
-	sleep(.1); # hack
+	my $sleep=0;
+	do {
+		sleep(.1); # hack
+		$sleep++;
+		$log->info( 'children: ' . join(', ', (map { $_ // '_'  } @children)));
+	} while grep defined, @children and $sleep < 3;
 
 	RPC::Switch::Shared::cleanup_db();
 
@@ -451,10 +456,14 @@ sub _load_config {
 			my $be = $md->{b};
 			die "invalid metod details for $fm: missing backend"
 				unless $be;
-			$md->{b} = $be = "$be$m" if $be =~ '\.$';
+			if ($be eq '.') {
+				$md->{b} = $be = $fm;
+			} elsif ($be =~ '\.$') {
+				$md->{b} = $be = "$be$m";
+			}
 			my ($bns) = split /\./, $be, 2;
 			$md->{_a} = $method2acl->{$fm} // $method2acl->{"$ns.*"}
-				// die "no acl for methods $fm?";
+				// die "no acl for method $fm?";
 			if (my $bf = $backendfilter->{$be} // $backendfilter->{"$bns.*"}) {
 				$md->{_f} = $bf;
 			}
