@@ -205,26 +205,14 @@ sub rpc_get_method_details {
 	# now find a backend
 	my $backend = $md->{b};
 
+	my $doc = sel('doc', $backend);
+	$md->{doc} = $doc if defined $doc;
+
 	#my $l = $workermethods->{$backend};
 	my $l = sel('wm', $backend);
 	#print '$l ', Dumper($l);
 
-	if ($l) {
-		$md->{doc} = $l->{doc};
-		#if (is_hashref($l)) {
-		#	my $dummy;
-		#	# filtering
-		#	($dummy, $l) = each %$l;
-		#}
-		#if (is_arrayref($l) and @$l) {
-		#	my $wm = $$l[0];
-		#	$md->{doc} = $wm->{doc}
-		#		// 'no documentation available';
-		#}
-	} else {
-		$md->{msg} = 'no backend worker available';
-	}
-
+	$md->{msg} = 'no backend worker available' unless $l;
 
 	# follow the rpc-switch calling conventions here
 	return (RES_OK, $md);
@@ -413,11 +401,15 @@ sub rpc_announce {
 		die "filtering not allowed for method $method";
 	}
 
+	# latest announce determines doc
+	ins('doc', $method, $i->{doc}) if $i->{doc};
+
 	my %wmh = (
 		method => $method,
 		child => $child,
 		cid => $con->cid,
-		($i->{doc} ? (doc => $i->{doc}) : ()),
+		# doc can be too large to fit in a dupsort value
+		#($i->{doc} ? (doc => $i->{doc}) : ()),
 		($filtervalue ? (
 			filtervalue => $filtervalue
 		) : ()),

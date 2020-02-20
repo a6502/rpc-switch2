@@ -25,6 +25,7 @@ our %tables = (
 	backend2acl => 0,
 	backendfilter => 0,
 	cons => 0,
+	doc => 0,
 	method2acl => 0,
 	methods => 0,
 	who2acl => 0,
@@ -34,6 +35,7 @@ our %tables = (
 our %jtables = map +($_ => 1), qw(
 	backend2acl
 	cons
+	doc
 	method2acl
 	methods
 	who2acl
@@ -160,7 +162,7 @@ sub upd {
 	my ($table, $key, $val) = @_;
 	my $dbi = $dbis{$table} or die "table $table unknown";
 	croak "table $table is not a json table"  unless $jtables{$table};
-	croak "val should be a hashref" unless is_hashref($val) and $jtables{$table};
+	croak "val should be a hashref" unless is_hashref($val);
 	
 	my $oldval;
 	my $txn = LMDB::Txn->new($env, 0);
