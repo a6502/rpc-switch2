@@ -468,7 +468,7 @@ sub rpc_withdraw {
 	die 'nothing announced?'  unless is_arrayref($wms);
 	
 	# todo: filtering?
-	my @m = grep($_ == $method, 0..$#$wms);
+	my @m = grep(@$wms[$_] eq $method, 0..$#$wms);
 	die "method $method was not announced" unless @m;
 	splice @$wms, $_, 1 for @m;
 	#upd('cons', $con->cid, {workermethods => $wms});
