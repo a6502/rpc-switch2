@@ -29,6 +29,7 @@ our %tables = (
 	method2acl => 0,
 	methods => 0,
 	who2acl => 0,
+	who2visacl => 0,
 	wm => MDB_DUPSORT, # workers per methods
 );
 
@@ -39,6 +40,7 @@ our %jtables = map +($_ => 1), qw(
 	method2acl
 	methods
 	who2acl
+	who2visacl
 	wm
 );
 

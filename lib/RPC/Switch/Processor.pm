@@ -710,8 +710,9 @@ sub _handle_internal_request {
 sub _handle_request {
 	my ($con, $request) = @_;
 	#$log->debug('    in handle_request: ' . Dumper($request)) if $debug;
-	my $method = $request->{method} or die 'huh?';
 	my $id = $request->{id};
+	my $method = $request->{method} or
+		return _error($con, $id, ERR_METHOD, 'Method "" does not exist');
 
 	my $txn = txn();
 	my $md = sel('methods', $method, $txn);
@@ -750,6 +751,7 @@ sub _handle_request {
 		$txn->commit();
 		return _error($con, $id, ERR_NOTAL, "acl $acl does not allow method $method for $who")
 	}
+
 	$txn->commit(); #meh
 	
 	if (my $ras = $md->{r}) {
@@ -921,6 +923,10 @@ sub _do_dispatch {
 	}
 	$rpcswitch->{vci} = $vci;
 	$rpcswitch->{who} = $con->{who};
+	if ($md->{e}) { # show visible acls on request
+		#my $visacl = sel('who2visacl', $con->{who});
+		$rpcswitch->{acls} = [ keys %{sel('who2visacl', $con->{who})} ];
+	}
 
 	my $workerrequest = encode_json({
 		jsonrpc => '2.0',

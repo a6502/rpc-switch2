@@ -31,6 +31,9 @@ $acl = {
 	'public' => '*',
 };
 
+# acls visible for backends
+$visible_acl = [qw( prov )];
+
 # which acls are allowed to call which methods
 $method2acl = {
 	# namespace.method => acl

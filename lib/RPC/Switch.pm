@@ -378,7 +378,7 @@ sub _load_config {
 
 	my $slurp = Mojo::File->new($methodpath)->slurp();
 
-	my ($acl, $backend2acl, $backendfilter, $method2acl, $methods);
+	my ($acl, $backend2acl, $backendfilter, $method2acl, $methods, $visible_acl);
 
 	local $SIG{__WARN__} = sub { die @_ };
 
@@ -386,14 +386,21 @@ sub _load_config {
 
 	die "error loading method config: $@" if $@;
 	die 'emtpy method config?' unless $acl && $backend2acl
-		&& $backendfilter && $method2acl && $methods;
+		&& $backendfilter && $method2acl && $methods && $visible_acl;
+
+	for (@$visible_acl) {
+		die "no such acl $_ in \$visibile_acl" unless exists $acl->{$_};
+	}
+	my %visible_acl = map { $_ => 1} @$visible_acl;
 
 	# reverse the acl hash: create a hash of users with a hash of acls
 	# these users belong to as values
+
 	my %who2acl;
+	my %who2visacl;
 	while (my ($a, $b) = each(%$acl)) {
-		#say 'processing ', $a;
-		my @acls = ($a, 'public');
+		#say 'processing ', $;
+		#my @acls = ($a, 'public');
 		my @users;
 		my $i = 0;
 		my @tmp = (is_arrayref($b) ? @$b : ($b));
@@ -411,19 +418,28 @@ sub _load_config {
 		}
 		#print 'acls: ', Dumper(\@acls);
 		#print 'users: ', Dumper(\@users);
-		# now we have a list of acls resolving to a list o users
+		# now we have a list of acls resolving to a list of users
 		# for all users in the list of users
 		for my $u (@users) {
-			# add the acls
-			if ($who2acl{$u}) {
-				$who2acl{$u}->{$_} = 1 for @acls;
-			} else {
-				$who2acl{$u} = { map { $_ => 1} @acls };
-			}
+			# add the acl
+			$who2acl{$u}->{$a} = 1;
+			$who2visacl{$u}->{$a} = 1 if $visible_acl{$a};
+			#if ($who2acl{$u}) {
+			#	$who2acl{$u}->{$_} = 1 for @acls;
+			#} else {
+			#	$who2acl{$u} = { map { $_ => 1} @acls };
+			#}
 		}
+	}
+	# now add all users to acl public
+	for (keys %who2acl) {
+		$who2acl{$_}->{'public'} = 1;
 	}
 	while (my ($a, $b) = each(%who2acl)) {
 		ins('who2acl', $a, $b);
+	}
+	while (my ($a, $b) = each(%who2visacl)) {
+		ins('who2visacl', $a, $b);
 	}
 
 	# check if all acls mentioned exist
@@ -485,6 +501,7 @@ sub _load_config {
 		$log->debug('backendfilter ' . Dumper($backendfilter));
 		$log->debug('method2acl    ' . Dumper($method2acl));
 		$log->debug('methods       ' . Dumper(\%methods));
+		$log->debug('who2visacl    ' . Dumper(\%who2visacl));
 		$log->debug('who2acl       ' . Dumper(\%who2acl));
 	}
 
