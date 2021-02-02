@@ -925,7 +925,7 @@ sub _do_dispatch {
 	$rpcswitch->{who} = $con->{who};
 	if ($md->{e}) { # show visible acls on request
 		#my $visacl = sel('who2visacl', $con->{who});
-		$rpcswitch->{acls} = [ keys %{sel('who2visacl', $con->{who})} ];
+		$rpcswitch->{acls} = [ keys %{ sel('who2visacl', $con->{who}) // {} } ];
 	}
 
 	my $workerrequest = encode_json({
