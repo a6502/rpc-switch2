@@ -402,15 +402,19 @@ sub _load_config {
 		#say 'processing ', $;
 		#my @acls = ($a, 'public');
 		my @users;
-		my $i = 0;
+		my $depth = 0;
+		my %inc;
 		my @tmp = (is_arrayref($b) ? @$b : ($b));
 		while ($_ = shift @tmp) {
 			#say "doing $_";
 			if (/^\+(.*)$/) {
-				#say "including acl $1";
-				die "acl depth exceeded for $1" if ++$i > 10;
-				my $b2 = $acl->{$1};
-				die "unknown acl $1" unless $b2;
+				my $i = $1;
+				#say "including acl $i";
+				die "acl depth exceeded for $i" if ++$depth > 11; # acls go up to 11..
+				next if $inc{$i}; # already have acl $i
+				$inc{$i}++;
+				my $b2 = $acl->{$i};
+				die "unknown acl $i" unless $b2;
 				push @tmp, (is_arrayref($b2) ? @$b2 : $b2);
 			} else {
 				push @users, $_
