@@ -410,8 +410,8 @@ sub _load_config {
 			if (/^\+(.*)$/) {
 				my $i = $1;
 				#say "including acl $i";
-				die "acl depth exceeded for $i" if ++$depth > 11; # acls go up to 11..
 				next if $inc{$i}; # already have acl $i
+				die "acl depth exceeded for $i" if ++$depth > 11; # acls go up to 11..
 				$inc{$i}++;
 				my $b2 = $acl->{$i};
 				die "unknown acl $i" unless $b2;
