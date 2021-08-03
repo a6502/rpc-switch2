@@ -174,7 +174,7 @@ sub _handle_response {
 		return 'error is not an object' unless is_hashref($e);
 		return 'error code is not a integer' unless defined $e->{code} and $e->{code} =~ /^-?\d+$/;
         	return 'error message is not a string' if ref $e->{message};
-        	return 'extra members in error object' if (keys %$e == 3 and !exists $e->{data}) or (keys %$e > 2);
+        	return 'extra members in error object' if (keys %$e == 3 and !exists $e->{data}) or (keys %$e > 3);
 		$cb->($r->{error}) if $cb and is_coderef($cb);
 	} else {
 		return undef, "response for unknown call $id" unless $cb and is_coderef($cb);
